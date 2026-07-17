@@ -1,0 +1,248 @@
+/* SquadStack.ai Design System — Colors & Type */
+
+/* ─────────────── FONT ─────────────── */
+/* Albert Sans is the single brand typeface. Loaded from Google Fonts. */
+@import url('https://fonts.googleapis.com/css2?family=Albert+Sans:wght@300;400;500;600;700;800;900&display=swap');
+
+:root {
+  /* ─── PRIMARY PALETTE ─── */
+  --ss-lucid:            #6F39F5; /* brand purple — accents, CTAs, highlights */
+  --ss-lucid-dark:       #5A2DDB; /* primary-button hover / pressed */
+  --ss-darkmatter:       #191132; /* dark navy — headings, body, dark bg */
+  --ss-darkmatter-2:     #2B1F55; /* raised dark surface — case-study cards on dark */
+  --ss-white:            #FFFFFF;
+
+  /* ─── SECONDARY PALETTE (use sparingly) ─── */
+  --ss-pale-orange:      #FFA378;
+  --ss-pale-lavender:    #E3B3FF;
+  --ss-pale-lucid:       #E1D5FF;
+
+  /* ─── TINT PALETTE (alternating section backgrounds) ─── */
+  --ss-pale-orange-tint:   #F4D4C5;
+  --ss-pale-lavender-tint: #F0D7FF;
+  --ss-pale-lucid-tint:    #EFE9FF;
+
+  /* ─── SEMANTIC FG / BG ─── */
+  --ss-bg:          var(--ss-white);
+  --ss-bg-alt:      var(--ss-pale-lucid-tint); /* alternating section */
+  --ss-bg-dark:     var(--ss-darkmatter);
+  --ss-bg-purple:   var(--ss-lucid);
+
+  --ss-fg:          var(--ss-darkmatter); /* primary text on white */
+  --ss-fg-muted:    #5A5172;              /* secondary text */
+  --ss-fg-subtle:   #6E6688;              /* caption/label text — AA on white (~4.6:1) */
+  --ss-fg-on-dark:  var(--ss-white);
+  --ss-fg-on-purple: var(--ss-white);
+  --ss-fg-accent:   var(--ss-lucid);      /* link, H2/H3 accent */
+
+  /* ─── BORDERS & SURFACES ─── */
+  --ss-border:         #E6E1F5;
+  --ss-border-strong:  var(--ss-darkmatter);
+  --ss-surface-callout: var(--ss-pale-lucid-tint);
+
+  /* ─── STATUS (functional product UI only — never decoration) ─── */
+  /* The marketing palette bans greens/reds/yellows; these muted, on-brand
+     status hues exist solely for product states (success / warning / error). */
+  --ss-success: #1F8A5B; /* @kind color */
+  --ss-warning: #B7791F; /* @kind color */
+  --ss-danger:  #C8453B; /* @kind color */
+  --ss-info:    var(--ss-lucid); /* @kind color */
+
+  /* ─── GRADIENTS ─── */
+  --ss-gradient-1: linear-gradient(135deg, var(--ss-pale-lucid) 0%, var(--ss-lucid) 100%); /* @kind color */
+  --ss-gradient-2: linear-gradient(135deg, var(--ss-lucid) 0%, var(--ss-pale-lavender) 100%); /* @kind color */
+  --ss-gradient-3: linear-gradient(135deg, var(--ss-pale-lavender) 0%, var(--ss-pale-orange) 100%); /* @kind color */
+  --ss-gradient-4: linear-gradient(135deg, var(--ss-pale-orange) 0%, var(--ss-pale-orange-tint) 100%); /* @kind color */
+
+  /* ─── TYPE ─── */
+  --ss-font: 'Albert Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* Type scale (desktop). H1/H2 are display, intentionally large. */
+  --ss-fs-display:   clamp(40px, 6vw, 84px); /* @kind font */
+  --ss-fs-h1:        clamp(32px, 4.5vw, 60px); /* @kind font */
+  --ss-fs-h2:        clamp(26px, 3vw, 40px); /* @kind font */
+  --ss-fs-h3:        clamp(20px, 2vw, 26px); /* @kind font */
+  --ss-fs-h4:        18px; /* @kind font */
+  --ss-fs-body:      16px; /* @kind font */
+  --ss-fs-body-lg:   18px; /* @kind font */
+  --ss-fs-caption:   14px; /* @kind font */
+  --ss-fs-micro:     12px; /* @kind font */
+
+  /* Weights */
+  --ss-fw-light:      300; /* @kind font */
+  --ss-fw-regular:    400; /* @kind font */
+  --ss-fw-medium:     500; /* @kind font */
+  --ss-fw-semi:       600; /* @kind font */
+  --ss-fw-bold:       700; /* @kind font */
+  --ss-fw-extrabold:  800; /* @kind font */
+  --ss-fw-black:      900; /* @kind font */
+
+  /* Line heights */
+  --ss-lh-tight:  1.04; /* @kind font */
+  --ss-lh-heading:1.15; /* @kind font */
+  --ss-lh-body:   1.55; /* @kind font */
+  --ss-lh-loose:  1.7; /* @kind font */
+
+  /* Letter spacing (display goes negative for premium feel) */
+  --ss-tracking-display: -0.03em; /* @kind font */
+  --ss-tracking-heading: -0.015em; /* @kind font */
+  --ss-tracking-body:     0; /* @kind font */
+  --ss-tracking-label:    0.04em; /* @kind font */
+
+  /* ─── SPACING (8pt grid) ─── */
+  --ss-space-1:  4px;
+  --ss-space-2:  8px;
+  --ss-space-3:  12px;
+  --ss-space-4:  16px;
+  --ss-space-5:  24px;
+  --ss-space-6:  32px;
+  --ss-space-7:  48px;
+  --ss-space-8:  64px;
+  --ss-space-9:  80px;
+  --ss-space-10: 120px;
+
+  /* ─── RADIUS (sharp-edge identity: 4-8px max) ─── */
+  --ss-radius-sm:  4px;
+  --ss-radius-md:  8px;
+  --ss-radius-lg:  12px; /* reserved for marketing cards only */
+  --ss-radius-pill: 999px; /* for pill buttons & badges */
+
+  /* ─── SHADOWS (soft, purposeful) ─── */
+  --ss-shadow-sm: 0 1px 2px rgba(25, 17, 50, 0.06);
+  --ss-shadow-md: 0 6px 18px rgba(25, 17, 50, 0.08);
+  --ss-shadow-lg: 0 20px 50px rgba(25, 17, 50, 0.12);
+  --ss-shadow-purple: 0 12px 32px rgba(111, 57, 245, 0.28);
+
+  /* ─── MOTION ─── */
+  --ss-ease-out:  cubic-bezier(0.16, 1, 0.3, 1); /* @kind other */
+  --ss-ease: cubic-bezier(0.2, 0.8, 0.2, 1); /* @kind other */
+  --ss-dur-fast:  120ms; /* @kind other */
+  --ss-dur-base:  200ms; /* @kind other */
+  --ss-dur-slow:  360ms; /* @kind other */
+}
+
+/* ─────────────── BASE ELEMENTS ─────────────── */
+
+body {
+  font-family: var(--ss-font);
+  font-size: var(--ss-fs-body);
+  line-height: var(--ss-lh-body);
+  color: var(--ss-fg);
+  background: var(--ss-bg);
+  font-feature-settings: "ss01", "cv11";
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, .ss-h1 {
+  font-family: var(--ss-font);
+  font-size: var(--ss-fs-h1);
+  font-weight: var(--ss-fw-extrabold);
+  line-height: var(--ss-lh-heading);
+  letter-spacing: var(--ss-tracking-display);
+  color: var(--ss-fg);
+  margin: 0 0 var(--ss-space-5);
+  text-wrap: balance;
+}
+.ss-display {
+  font-size: var(--ss-fs-display);
+  font-weight: var(--ss-fw-extrabold);
+  line-height: var(--ss-lh-tight);
+  letter-spacing: var(--ss-tracking-display);
+}
+h2, .ss-h2 {
+  font-size: var(--ss-fs-h2);
+  font-weight: var(--ss-fw-bold);
+  line-height: var(--ss-lh-heading);
+  letter-spacing: var(--ss-tracking-heading);
+  color: var(--ss-fg);
+  margin: 0 0 var(--ss-space-4);
+}
+h3, .ss-h3 {
+  font-size: var(--ss-fs-h3);
+  font-weight: var(--ss-fw-semi);
+  line-height: var(--ss-lh-heading);
+  color: var(--ss-fg);
+  margin: 0 0 var(--ss-space-3);
+}
+h4, .ss-h4 {
+  font-size: var(--ss-fs-h4);
+  font-weight: var(--ss-fw-semi);
+  line-height: 1.3;
+  color: var(--ss-fg);
+  margin: 0 0 var(--ss-space-2);
+}
+p, .ss-body {
+  font-size: var(--ss-fs-body);
+  line-height: var(--ss-lh-body);
+  color: var(--ss-fg);
+  margin: 0 0 var(--ss-space-4);
+  text-wrap: pretty;
+}
+.ss-body-lg {
+  font-size: var(--ss-fs-body-lg);
+  line-height: var(--ss-lh-body);
+}
+.ss-caption {
+  font-size: var(--ss-fs-caption);
+  color: var(--ss-fg-muted);
+}
+.ss-eyebrow {
+  font-size: var(--ss-fs-micro);
+  font-weight: var(--ss-fw-semi);
+  letter-spacing: var(--ss-tracking-label);
+  text-transform: uppercase;
+  color: var(--ss-fg-accent);
+}
+.ss-metric {
+  font-family: var(--ss-font);
+  font-weight: var(--ss-fw-bold);
+  color: var(--ss-fg-accent);
+  line-height: 1;
+  letter-spacing: var(--ss-tracking-display);
+}
+a, .ss-link {
+  color: var(--ss-fg-accent);
+  text-decoration: none;
+  font-weight: var(--ss-fw-semi);
+  transition: opacity var(--ss-dur-base) var(--ss-ease);
+}
+a:hover, .ss-link:hover { opacity: 0.75; }
+
+/* Utility: dark surface override.
+   On dark backgrounds ALL text must be white — including links, eyebrows,
+   metrics and captions that are Lucid (purple) on light surfaces. Purple text
+   on dark fails contrast, so flip everything to white here. */
+.ss-on-dark,
+.ss-on-dark h1, .ss-on-dark h2, .ss-on-dark h3, .ss-on-dark h4,
+.ss-on-dark p, .ss-on-dark li,
+.ss-on-dark a, .ss-on-dark .ss-link,
+.ss-on-dark .ss-eyebrow, .ss-on-dark .ss-metric,
+.ss-on-dark .ss-caption {
+  color: var(--ss-fg-on-dark);
+}
+/* Muted/subtle text on dark stays white but slightly dimmed for hierarchy. */
+.ss-on-dark .ss-caption, .ss-on-dark .ss-fg-muted {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* Utility: brand watermark for slides / collateral.
+   Place once per surface, in a clear corner, inside the slide margin.
+   Pair with the correct logo variant: white-on-dark logo on dark surfaces,
+   transparent (dark) logo on light surfaces. Keep it small so it never
+   competes with content; it must not overlap any other element. */
+.ss-watermark {
+  position: absolute;
+  bottom: var(--ss-space-7, 40px);
+  right: var(--ss-space-7, 40px);
+  z-index: 10;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+}
+.ss-watermark img {
+  height: 32px;        /* ~28–36px tall wordmark; never upscale past native px */
+  width: auto;         /* preserve aspect ratio — never distort the 7:1 wordmark */
+  display: block;
+}
+.ss-watermark--mark img { height: 36px; } /* square logomark variant */

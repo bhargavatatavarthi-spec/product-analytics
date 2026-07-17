@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kotak PAL · Journey Analyzer</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%236F39F5'/><text x='50' y='72' font-size='64' font-family='Arial' font-weight='800' fill='white' text-anchor='middle'>K</text></svg>">
+  <link rel="stylesheet" href="/assets/colors_and_type.css">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- ───────────── SIDEBAR ───────────── -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">K</div>
+        <div class="brand-text">
+          <div class="brand-title">Kotak PAL</div>
+          <div class="brand-sub">Journey Analyzer</div>
+        </div>
+      </div>
+      <nav id="nav"></nav>
+      <div class="nav-spacer"></div>
+      <div id="nav-footer"></div>
+    </aside>
+
+    <!-- ───────────── MAIN ───────────── -->
+    <div class="main">
+      <header class="topbar">
+        <div class="topbar-title">
+          <div id="screen-title" class="screen-title"></div>
+          <div id="screen-desc" class="screen-desc"></div>
+        </div>
+        <div class="topbar-actions">
+          <div id="range-picker" class="range-picker"></div>
+          <div class="completeness-chip" id="completeness-chip"></div>
+        </div>
+      </header>
+
+      <!-- PERSISTENT POPULATION ANCHOR -->
+      <div id="population-anchor" class="population-anchor"></div>
+
+      <!-- CONTENT -->
+      <main id="content" class="content"></main>
+    </div>
+  </div>
+
+  <!-- Toast host -->
+  <div id="toast-host" class="toast-host"></div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>
