@@ -135,6 +135,19 @@ ATTR_DIMENSIONS: list[dict] = [
         ],
     },
     {
+        "key": "emi",
+        "label": "EMI",
+        "field": "emi",
+        "kind": "numeric",
+        "bins": [
+            {"name": "Under ₹5k", "lo": 0, "hi": 5000},
+            {"name": "₹5k – ₹10k", "lo": 5000, "hi": 10000},
+            {"name": "₹10k – ₹20k", "lo": 10000, "hi": 20000},
+            {"name": "₹20k – ₹40k", "lo": 20000, "hi": 40000},
+            {"name": "₹40k and above", "lo": 40000, "hi": None},
+        ],
+    },
+    {
         "key": "scheme",
         "label": "Scheme code",
         "field": "schemecode",

@@ -89,6 +89,19 @@ def test_offer_feed_joins_onto_journey_lead(db):
     assert lead.schemecode == "11888"
 
 
+def test_emi_computed_from_terms():
+    # Reducing-balance EMI for ₹2.5L over 24m at 12.5% ≈ ₹11,827.
+    assert abs(ingest.compute_emi(250000, 12.5, 24) - 11826.83) < 1
+    assert ingest.compute_emi(120000, 0, 12) == 10000.0  # zero-interest edge
+    assert ingest.compute_emi(None, 12.5, 24) is None
+    # Offer-feed row with no EMI column -> EMI derived on extract.
+    res = ingest.extract_row(
+        {"internal_id": "L1", "max_loan_amount": "250000", "max_tenure_months": "24", "roi": "0.125"},
+        ingest.suggest_mapping(["internal_id", "max_loan_amount", "max_tenure_months", "roi"]),
+    )
+    assert res.ok and abs(res.values["emi"] - 11826.83) < 1
+
+
 def test_detect_dayfirst():
     assert ingest.detect_dayfirst(["6/18/2026", "6/15/2026"]) is False  # month-first
     assert ingest.detect_dayfirst(["18/06/2026", "15/06/2026"]) is True  # day-first

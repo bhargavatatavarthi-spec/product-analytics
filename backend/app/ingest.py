@@ -138,6 +138,24 @@ def coerce_roi(value: str | None) -> float | None:
     return round(f * 100, 2) if 0 < f <= 1 else f
 
 
+def compute_emi(principal: float | None, annual_roi_pct: float | None, months: float | None) -> float | None:
+    """Reducing-balance EMI from loan terms: P·r·(1+r)^n / ((1+r)^n − 1).
+
+    Used when the offer feed doesn't carry an EMI column but has amount, ROI and
+    tenure. `annual_roi_pct` is a percentage (11.5), not a fraction.
+    """
+    if not principal or not months or annual_roi_pct is None:
+        return None
+    n = int(months)
+    if n <= 0:
+        return None
+    r = annual_roi_pct / 1200.0  # monthly rate as a fraction
+    if r == 0:
+        return round(principal / n, 2)
+    factor = (1 + r) ** n
+    return round(principal * r * factor / (factor - 1), 2)
+
+
 def coerce_bool(value: str | None) -> bool:
     if is_na(value):
         return False
@@ -248,6 +266,9 @@ def extract_row(
         "last_disposition": disposition,
         "na_cells": na_cells,
     }
+    # Derive EMI from terms when the feed doesn't supply it (reducing balance).
+    if values["emi"] is None:
+        values["emi"] = compute_emi(values["max_loan_amount"], values["roi"], values["max_tenure_months"])
     return RowResult(ok=True, values=values)
 
 
