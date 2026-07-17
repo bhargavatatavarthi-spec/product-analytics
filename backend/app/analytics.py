@@ -1,19 +1,20 @@
 """Analytics computations.
 
-Every screen in the dashboard is derived here from the reconstructed data
-(`Lead` / `StageEvent` / `DailyDrop`) plus the analyst's stage-classification
-overrides and global settings. Nothing is hard-coded: an empty database yields
-zeroed, honest empty states.
+Every screen is derived here from the reconstructed data (`Lead` / `StageEvent`
+/ `DailyDrop`) plus the analyst's stage-classification overrides and settings.
 
-Time is anchored to `as_of` — the most recent drop date in the data — so that
-imported historical datasets analyse correctly regardless of the wall clock.
+Aggregation happens in SQL (`GROUP BY`), not by pulling rows into Python: a
+screen's counts come back as ~20 grouped rows regardless of whether the table
+holds 4k or 400k leads, so screens stay fast on modest infra. Time is anchored
+to `as_of` — the most recent drop date — so imported historical data analyses
+correctly regardless of the wall clock.
 """
 from __future__ import annotations
 
-import statistics
+from collections import defaultdict
 from datetime import date, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, and_, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from . import catalog
@@ -39,12 +40,15 @@ def indian_format(n: float) -> str:
     return sign + ",".join(parts) + "," + tail
 
 
+def _cr(amount: float) -> str:
+    return f"₹{amount / 1e7:.1f} Cr"
+
+
 def get_as_of(db: Session) -> date:
     latest = db.execute(select(func.max(Lead.last_seen_on))).scalar()
     if latest:
         return latest
-    latest_drop = db.execute(select(func.max(DailyDrop.drop_date))).scalar()
-    return latest_drop or date.today()
+    return db.execute(select(func.max(DailyDrop.drop_date))).scalar() or date.today()
 
 
 def get_overrides(db: Session) -> dict[str, str]:
@@ -71,53 +75,61 @@ def range_window(as_of: date, range_key: str) -> tuple[date | None, date]:
     return as_of - timedelta(days=days - 1), as_of
 
 
-def leads_in_window(db: Session, start: date | None, end: date) -> list[Lead]:
-    stmt = select(Lead)
-    if start is not None:
-        stmt = stmt.where(Lead.entry_date >= start, Lead.entry_date <= end)
-    else:
-        stmt = stmt.where(Lead.entry_date <= end)
-    return list(db.execute(stmt).scalars())
-
-
-def counts_by_bucket(leads: list[Lead], overrides: dict[str, str]) -> dict[str, int]:
-    counts = {b: 0 for b in catalog.BUCKETS}
-    for lead in leads:
-        counts[effective_bucket(lead.current_stage, overrides)] += 1
-    return counts
-
-
 def has_data(db: Session) -> bool:
     return db.execute(select(func.count(Lead.id))).scalar_one() > 0
 
 
+def _apply_window(stmt, start: date | None, end: date):
+    if start is not None:
+        return stmt.where(Lead.entry_date >= start, Lead.entry_date <= end)
+    return stmt.where(Lead.entry_date <= end)
+
+
+def _stage_counts(db: Session, start: date | None, end: date) -> dict[str, int]:
+    """{current_stage: lead_count} for the entry-date window — one GROUP BY."""
+    stmt = _apply_window(select(Lead.current_stage, func.count()), start, end).group_by(Lead.current_stage)
+    return {stage: count for stage, count in db.execute(stmt).all()}
+
+
+def _bucketize(stage_counts: dict[str, int], overrides: dict[str, str]) -> dict[str, int]:
+    counts = {b: 0 for b in catalog.BUCKETS}
+    for stage, c in stage_counts.items():
+        counts[effective_bucket(stage, overrides)] += c
+    return counts
+
+
+def _days_in_stage(as_of: date):
+    """SQL expression: whole days a lead has sat in its current stage."""
+    as_of_iso = as_of.isoformat()
+    return cast(
+        func.julianday(as_of_iso) - func.julianday(func.coalesce(Lead.stage_entered_on, as_of_iso)),
+        Integer,
+    )
+
+
+def _won_stages(overrides: dict[str, str]) -> list[str]:
+    return [s for s, b in {**catalog.DEFAULT_BUCKET, **overrides}.items() if b == "won"]
+
+
 # ─────────────────────────── range summaries ───────────────────────────
 def range_summaries(db: Session) -> dict:
-    """entered count + bucket deltas for every range preset (for the picker/anchor)."""
     as_of = get_as_of(db)
     overrides = get_overrides(db)
     out = {}
     for r in catalog.RANGES:
         start, end = range_window(as_of, r["key"])
-        leads = leads_in_window(db, start, end)
-        counts = counts_by_bucket(leads, overrides)
+        counts = _bucketize(_stage_counts(db, start, end), overrides)
+        entered = sum(counts.values())
         delta = None
-        if r["days"] is not None:
-            prev_start = start - timedelta(days=r["days"])
-            prev_end = start - timedelta(days=1)
-            prev = counts_by_bucket(leads_in_window(db, prev_start, prev_end), overrides)
-            delta = {}
-            for b in ("won", "inflight", "lost"):
-                if prev[b]:
-                    delta[b] = round((counts[b] - prev[b]) / prev[b] * 100)
-                else:
-                    delta[b] = None
-        out[r["key"]] = {
-            "label": r["label"],
-            "full": r["full"],
-            "entered": len(leads),
-            "delta": delta,
-        }
+        if r["days"] is not None and start is not None:
+            prev = _bucketize(
+                _stage_counts(db, start - timedelta(days=r["days"]), start - timedelta(days=1)), overrides
+            )
+            delta = {
+                b: (None if not prev[b] else round((counts[b] - prev[b]) / prev[b] * 100))
+                for b in ("won", "inflight", "lost")
+            }
+        out[r["key"]] = {"label": r["label"], "full": r["full"], "entered": entered, "delta": delta}
     return {"as_of": as_of.isoformat(), "ranges": out}
 
 
@@ -128,20 +140,21 @@ def overview(db: Session, range_key: str) -> dict:
     settings = get_settings(db)
     aging_threshold = int(settings["aging_threshold"])
     start, end = range_window(as_of, range_key)
-    leads = leads_in_window(db, start, end)
-    entered = len(leads)
-    counts = counts_by_bucket(leads, overrides)
 
-    # deltas vs previous equal window.
+    stage_counts = _stage_counts(db, start, end)
+    counts = _bucketize(stage_counts, overrides)
+    entered = sum(counts.values())
+
     days = catalog.RANGE_DAYS.get(range_key)
     delta = None
     if days is not None and start is not None:
-        prev = counts_by_bucket(
-            leads_in_window(db, start - timedelta(days=days), start - timedelta(days=1)), overrides
+        prev = _bucketize(
+            _stage_counts(db, start - timedelta(days=days), start - timedelta(days=1)), overrides
         )
-        delta = {}
-        for b in ("won", "inflight", "lost"):
-            delta[b] = None if not prev[b] else round((counts[b] - prev[b]) / prev[b] * 100)
+        delta = {
+            b: (None if not prev[b] else round((counts[b] - prev[b]) / prev[b] * 100))
+            for b in ("won", "inflight", "lost")
+        }
 
     def bucket_block(b: str) -> dict:
         pct = round(counts[b] / entered * 100, 1) if entered else 0
@@ -154,22 +167,30 @@ def overview(db: Session, range_key: str) -> dict:
 
     buckets = {b: bucket_block(b) for b in ("won", "inflight", "lost", "unclassified")}
 
-    # Aging of in-flight leads.
-    inflight_leads = [l for l in leads if effective_bucket(l.current_stage, overrides) == "inflight"]
-    inflight_count = len(inflight_leads)
+    # Aging of in-flight leads — bucket days-in-stage in SQL, group by stage+bucket.
+    dis = _days_in_stage(as_of)
+    whens = []
+    for i, a in enumerate(catalog.AGING_BUCKETS):
+        cond = dis >= a["min"] if a["max"] is None else and_(dis >= a["min"], dis <= a["max"])
+        whens.append((cond, i))
+    age_case = case(*whens, else_=len(catalog.AGING_BUCKETS) - 1)
+    age_stmt = _apply_window(
+        select(Lead.current_stage, age_case.label("b"), func.count()), start, end
+    ).group_by(Lead.current_stage, age_case)
+
     bar_counts = [0] * len(catalog.AGING_BUCKETS)
-    stalled = 0
+    inflight_count = stalled = 0
+    for stage, b, c in db.execute(age_stmt).all():
+        if effective_bucket(stage, overrides) != "inflight":
+            continue
+        bar_counts[b] += c
+        inflight_count += c
+        if catalog.AGING_BUCKETS[b]["min"] >= aging_threshold:
+            stalled += c
+
     first_stalled_idx = next(
         (i for i, a in enumerate(catalog.AGING_BUCKETS) if a["min"] >= aging_threshold), None
     )
-    for lead in inflight_leads:
-        dis = (as_of - (lead.stage_entered_on or as_of)).days
-        for i, a in enumerate(catalog.AGING_BUCKETS):
-            if dis >= a["min"] and (a["max"] is None or dis <= a["max"]):
-                bar_counts[i] += 1
-                break
-        if dis >= aging_threshold:
-            stalled += 1
     aging_bars = [
         {
             "label": a["label"],
@@ -212,67 +233,66 @@ def overview(db: Session, range_key: str) -> dict:
 # ─────────────────────────── cohort triangle ───────────────────────────
 def cohort(db: Session, milestone_label: str) -> dict:
     as_of = get_as_of(db)
-    milestone_order = catalog.MILESTONE_ORDER.get(milestone_label, catalog.MILESTONE_ORDER[catalog.DEFAULT_MILESTONE])
+    milestone_order = catalog.MILESTONE_ORDER.get(
+        milestone_label, catalog.MILESTONE_ORDER[catalog.DEFAULT_MILESTONE]
+    )
+    milestone_stages = [s for s, o in catalog.STAGE_ORDER.items() if o is not None and o >= milestone_order]
     cohort_dates = [as_of - timedelta(days=13 - i) for i in range(14)]
     earliest = cohort_dates[0]
 
-    leads = list(
+    # Cohort sizes: one GROUP BY over entry_date.
+    sizes = dict(
         db.execute(
-            select(Lead).where(Lead.entry_date >= earliest, Lead.entry_date <= as_of)
-        ).scalars()
+            select(Lead.entry_date, func.count())
+            .where(Lead.entry_date >= earliest, Lead.entry_date <= as_of)
+            .group_by(Lead.entry_date)
+        ).all()
     )
-    lead_by_pk = {l.id: l for l in leads}
-    # days-to-reach the milestone for each lead (min over qualifying events).
-    reach_day: dict[int, int] = {}
-    if lead_by_pk:
-        events = db.execute(
-            select(StageEvent).where(StageEvent.lead_pk.in_(lead_by_pk.keys()))
-        ).scalars()
-        for ev in events:
-            order = catalog.STAGE_ORDER.get(ev.stage)
-            if order is None or order < milestone_order:
-                continue
-            lead = lead_by_pk[ev.lead_pk]
-            if not lead.entry_date:
-                continue
-            d = (ev.observed_on - lead.entry_date).days
-            if d < 0:
-                d = 0
-            reach_day[ev.lead_pk] = min(reach_day.get(ev.lead_pk, d), d)
+
+    # Per-lead days-to-reach the milestone: MIN over qualifying stage events.
+    reach_by_cohort: dict[date, list[int]] = defaultdict(list)
+    if milestone_stages:
+        reach_day = cast(
+            func.julianday(StageEvent.observed_on) - func.julianday(Lead.entry_date), Integer
+        )
+        stmt = (
+            select(Lead.entry_date, func.min(reach_day))
+            .join(StageEvent, StageEvent.lead_pk == Lead.id)
+            .where(
+                Lead.entry_date >= earliest,
+                Lead.entry_date <= as_of,
+                StageEvent.stage.in_(milestone_stages),
+            )
+            .group_by(StageEvent.lead_pk)
+        )
+        for entry, rd in db.execute(stmt).all():
+            if entry is not None:
+                reach_by_cohort[entry].append(max(0, rd or 0))
 
     cols = [{"label": f"D{d}", "full": f"Day {d}"} for d in range(14)]
     rows = []
-    reach_days_all: list[int] = []
-    mature_count = 0
+    all_reach: list[int] = []
     plateau_days: list[int] = []
-    for c_idx, c_date in enumerate(cohort_dates):
-        cohort_leads = [l for l in leads if l.entry_date == c_date]
-        size = len(cohort_leads)
+    mature_count = 0
+    for c_date in cohort_dates:
+        size = sizes.get(c_date, 0)
         age = (as_of - c_date).days
-        cohort_reach = [reach_day[l.id] for l in cohort_leads if l.id in reach_day]
-        reach_days_all.extend(cohort_reach)
+        reach = reach_by_cohort.get(c_date, [])
+        all_reach.extend(reach)
         cells = []
-        final_frac = None
-        plateau_day = None
+        final_frac = 0.0
         for day in range(14):
             if day > age or size == 0:
                 cells.append({"mature": False, "value": None, "text": ""})
                 continue
-            reached = sum(1 for rd in cohort_reach if rd <= day)
-            frac = reached / size * 100
+            frac = sum(1 for rd in reach if rd <= day) / size * 100
             cells.append({"mature": True, "value": round(frac, 1), "text": f"{frac:.1f}%"})
             final_frac = frac
-            if plateau_day is None and final_frac and frac >= 0.98 * (max(cohort_reach, default=0) and final_frac or final_frac):
-                pass
-        # plateau day for this cohort: first day reaching >=98% of its own final value.
         if final_frac:
             for day in range(min(age, 13) + 1):
-                reached = sum(1 for rd in cohort_reach if rd <= day)
-                if reached / size * 100 >= 0.98 * final_frac:
-                    plateau_day = day
+                if sum(1 for rd in reach if rd <= day) / size * 100 >= 0.98 * final_frac:
+                    plateau_days.append(day)
                     break
-        if plateau_day is not None:
-            plateau_days.append(plateau_day)
         if age >= 13:
             mature_count += 1
         rows.append(
@@ -285,7 +305,9 @@ def cohort(db: Session, milestone_label: str) -> dict:
             }
         )
 
-    avg_days = round(statistics.mean(reach_days_all), 1) if reach_days_all else 0
+    import statistics
+
+    avg_days = round(statistics.mean(all_reach), 1) if all_reach else 0
     plateau_day = round(statistics.median(plateau_days)) if plateau_days else 0
     return {
         "as_of": as_of.isoformat(),
@@ -305,30 +327,52 @@ def cohort(db: Session, milestone_label: str) -> dict:
 
 
 # ─────────────────────────── stage explorer ───────────────────────────
+def _median_from_hist(pairs: list[tuple[int, int]], n: int) -> float:
+    if n == 0:
+        return 0.0
+    pairs = sorted(pairs)
+    lo, hi = (n - 1) // 2, n // 2
+    cum = 0
+    v_lo = v_hi = pairs[-1][0]
+    got_lo = False
+    for d, c in pairs:
+        cum += c
+        if not got_lo and cum > lo:
+            v_lo, got_lo = d, True
+        if cum > hi:
+            v_hi = d
+            break
+    return (v_lo + v_hi) / 2
+
+
 def stages(db: Session, range_key: str, stage_filter: str = "all") -> dict:
     as_of = get_as_of(db)
     overrides = get_overrides(db)
     start, end = range_window(as_of, range_key)
-    leads = leads_in_window(db, start, end)
 
-    grouped: dict[str, list[Lead]] = {}
-    for lead in leads:
-        grouped.setdefault(lead.current_stage, []).append(lead)
+    dis = _days_in_stage(as_of)
+    stmt = _apply_window(
+        select(Lead.current_stage, dis.label("d"), func.count()), start, end
+    ).group_by(Lead.current_stage, dis)
+
+    hist: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    totals: dict[str, int] = defaultdict(int)
+    for stage, d, c in db.execute(stmt).all():
+        hist[stage].append((int(d or 0), c))
+        totals[stage] += c
 
     rows = []
     bucket_counts = {"all": 0, "unclassified": 0, "won": 0, "inflight": 0, "lost": 0}
-    for stage_name, stage_leads in grouped.items():
+    for stage_name, n in totals.items():
         bucket = effective_bucket(stage_name, overrides)
-        median_days = statistics.median(
-            [(as_of - (l.stage_entered_on or as_of)).days for l in stage_leads]
-        ) if stage_leads else 0
+        median_days = _median_from_hist(hist[stage_name], n)
         rows.append(
             {
                 "name": stage_name,
                 "bucket": bucket,
                 "is_unclassified": bucket == "unclassified",
-                "count": len(stage_leads),
-                "count_label": indian_format(len(stage_leads)),
+                "count": n,
+                "count_label": indian_format(n),
                 "median": f"{median_days:.1f} d",
                 "known": stage_name in catalog.STAGE_ORDER,
             }
@@ -337,66 +381,75 @@ def stages(db: Session, range_key: str, stage_filter: str = "all") -> dict:
         bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
 
     rows.sort(key=lambda r: (0 if r["is_unclassified"] else 1, -r["count"]))
-    unclassified_count = bucket_counts["unclassified"]
     filtered = rows if stage_filter == "all" else [r for r in rows if r["bucket"] == stage_filter]
-
     return {
         "as_of": as_of.isoformat(),
         "range": range_key,
         "filter": stage_filter,
         "rows": filtered,
         "bucket_counts": bucket_counts,
-        "unclassified_count": unclassified_count,
+        "unclassified_count": bucket_counts["unclassified"],
         "empty": len(filtered) == 0,
     }
 
 
 # ─────────────────────────── attribution ───────────────────────────
-def _cr(amount: float) -> str:
-    return f"₹{amount / 1e7:.1f} Cr"
-
-
 def attribution(db: Session, range_key: str, dim_key: str = "amount") -> dict:
     as_of = get_as_of(db)
     overrides = get_overrides(db)
     start, end = range_window(as_of, range_key)
-    leads = leads_in_window(db, start, end)
+    won_stages = _won_stages(overrides)
 
-    won = [l for l in leads if effective_bucket(l.current_stage, overrides) == "won"]
-    won_count = len(won)
-    voice_won = [l for l in won if l.voice_connected]
-    organic_won = [l for l in won if not l.voice_connected]
+    # Voice vs organic split over disbursals — grouped in SQL.
+    voice_won = organic_won = 0
+    voice_amt = organic_amt = 0.0
+    won_rows: list = []
+    if won_stages:
+        amt_col = func.coalesce(Lead.disbursed_amount, Lead.max_loan_amount, 0)
+        split = _apply_window(
+            select(Lead.voice_connected, func.count(), func.sum(amt_col)).where(
+                Lead.current_stage.in_(won_stages)
+            ),
+            start,
+            end,
+        ).group_by(Lead.voice_connected)
+        for connected, cnt, amt in db.execute(split).all():
+            if connected:
+                voice_won, voice_amt = cnt, float(amt or 0)
+            else:
+                organic_won, organic_amt = cnt, float(amt or 0)
+        # Won leads are few — fetch their offer terms directly for the dim cuts.
+        won_rows = db.execute(
+            _apply_window(
+                select(
+                    Lead.voice_connected, Lead.disbursed_amount, Lead.max_loan_amount,
+                    Lead.max_tenure_months, Lead.roi, Lead.emi, Lead.schemecode,
+                ).where(Lead.current_stage.in_(won_stages)),
+                start,
+                end,
+            )
+        ).mappings().all()
 
-    def amt(rows: list[Lead]) -> float:
-        return sum((l.disbursed_amount or l.max_loan_amount or 0) for l in rows)
-
-    voice_amt, organic_amt = amt(voice_won), amt(organic_won)
-    ratio_pct = round(len(voice_won) / won_count * 100) if won_count else 0
+    won_count = voice_won + organic_won
+    ratio_pct = round(voice_won / won_count * 100) if won_count else 0
     org_share = 100 - ratio_pct if won_count else 0
-
     attr = {
         "ratio_pct": ratio_pct,
-        "voice": {
-            "count": len(voice_won),
-            "count_label": indian_format(len(voice_won)),
-            "amount": _cr(voice_amt),
-            "share": ratio_pct,
-        },
-        "organic": {
-            "count": len(organic_won),
-            "count_label": indian_format(len(organic_won)),
-            "amount": _cr(organic_amt),
-            "share": org_share,
-        },
+        "voice": {"count": voice_won, "count_label": indian_format(voice_won), "amount": _cr(voice_amt), "share": ratio_pct},
+        "organic": {"count": organic_won, "count_label": indian_format(organic_won), "amount": _cr(organic_amt), "share": org_share},
     }
 
-    # Call-outcome breakdown across leads with any dial activity.
-    dialed_leads = [l for l in leads if l.call_count > 0 or l.last_disposition]
-    dialed = len(dialed_leads)
-    disp_counts: dict[str, int] = {}
-    for l in dialed_leads:
-        if l.last_disposition:
-            disp_counts[l.last_disposition] = disp_counts.get(l.last_disposition, 0) + 1
+    # Call outcomes — grouped in SQL.
+    disp_stmt = _apply_window(
+        select(Lead.last_disposition, func.count()).where(Lead.last_disposition.isnot(None)), start, end
+    ).group_by(Lead.last_disposition)
+    disp_counts = {d: c for d, c in db.execute(disp_stmt).all()}
+    dialed = db.execute(
+        _apply_window(
+            select(func.count()).where(or_(Lead.call_count > 0, Lead.last_disposition.isnot(None))), start, end
+        )
+    ).scalar_one()
+
     total_disp = sum(disp_counts.values()) or 1
     connected_total = sum(c for d, c in disp_counts.items() if catalog.is_connected(d))
     connect_rate = round(connected_total / total_disp * 100) if disp_counts else 0
@@ -418,15 +471,12 @@ def attribution(db: Session, range_key: str, dim_key: str = "amount") -> dict:
     post_connect = [
         {"label": "Connected — reached a human", "value": f"{connect_rate}%"},
         {"label": "Reschedule / callback booked", "value": f"{disp_share('Call Rescheduled')}%"},
-        {"label": "On DNC / opt-out list", "value": f"{disp_share(chr(8220) if False else 'DNC Client : Don' + chr(39) + 't Call Further')}%"},
+        {"label": "On DNC / opt-out list", "value": f"{disp_share('DNC Client : Don' + chr(39) + 't Call Further')}%"},
     ]
 
-    # Offer-metadata attribution by the selected dimension.
     dim = catalog.ATTR_DIMENSION_BY_KEY.get(dim_key, catalog.ATTR_DIMENSIONS[0])
-    dim_rows = _dimension_rows(won, dim)
-
-    # Journey-stage attribution: where the Voice AI advanced voice-won leads.
-    stage_attr = _stage_attribution(db, voice_won)
+    dim_rows = _dimension_rows(won_rows, dim)
+    stage_attr = _stage_attribution(db, won_stages, start, end)
 
     return {
         "as_of": as_of.isoformat(),
@@ -442,29 +492,29 @@ def attribution(db: Session, range_key: str, dim_key: str = "amount") -> dict:
     }
 
 
-def _dimension_rows(won: list[Lead], dim: dict) -> list[dict]:
+def _dimension_rows(won_rows: list, dim: dict) -> list[dict]:
     field = dim["field"]
-    buckets: dict[str, list[Lead]] = {}
+    buckets: dict[str, list] = {}
     order: list[str] = []
     if dim["kind"] == "numeric":
         for b in dim["bins"]:
             buckets[b["name"]] = []
             order.append(b["name"])
-        for lead in won:
-            v = getattr(lead, field, None)
+        for row in won_rows:
+            v = row.get(field)
             if v is None:
                 continue
             for b in dim["bins"]:
                 if v >= b["lo"] and (b["hi"] is None or v < b["hi"]):
-                    buckets[b["name"]].append(lead)
+                    buckets[b["name"]].append(row)
                     break
-    else:  # categorical
-        for lead in won:
-            v = getattr(lead, field, None) or "Unknown"
-            if v not in buckets:
-                buckets[v] = []
+    else:
+        for row in won_rows:
+            v = row.get(field) or "Unknown"
+            buckets.setdefault(v, [])
+            if v not in order:
                 order.append(v)
-            buckets[v].append(lead)
+            buckets[v].append(row)
         order.sort(key=lambda k: -len(buckets[k]))
         order = order[:8]
 
@@ -474,8 +524,8 @@ def _dimension_rows(won: list[Lead], dim: dict) -> list[dict]:
         if not group:
             rows.append({"name": name, "disb": 0, "disb_label": "0", "voice_pct": 0, "amount": _cr(0)})
             continue
-        voice = sum(1 for l in group if l.voice_connected)
-        amount = sum((l.disbursed_amount or l.max_loan_amount or 0) for l in group)
+        voice = sum(1 for r in group if r["voice_connected"])
+        amount = sum((r["disbursed_amount"] or r["max_loan_amount"] or 0) for r in group)
         rows.append(
             {
                 "name": name,
@@ -488,28 +538,45 @@ def _dimension_rows(won: list[Lead], dim: dict) -> list[dict]:
     return rows
 
 
-def _stage_attribution(db: Session, voice_won: list[Lead]) -> list[dict]:
-    """Count voice-won leads whose journey passed each in-flight stage,
-    with the median calls it took — 'where the Voice AI advanced the disbursal'."""
-    if not voice_won:
+def _stage_attribution(db: Session, won_stages: list[str], start: date | None, end: date) -> list[dict]:
+    """Which in-flight stages the voice-won leads passed through, median calls."""
+    if not won_stages:
         return []
-    pk_to_calls = {l.id: l.call_count for l in voice_won}
-    pks = list(pk_to_calls.keys())
-    events = db.execute(select(StageEvent).where(StageEvent.lead_pk.in_(pks))).scalars()
-    stage_pks: dict[str, set[int]] = {}
-    for ev in events:
-        order = catalog.STAGE_ORDER.get(ev.stage)
-        if order is None or order >= 100:  # skip terminal Won and off-ladder branches
-            continue
-        stage_pks.setdefault(ev.stage, set()).add(ev.lead_pk)
+    vw = db.execute(
+        _apply_window(
+            select(Lead.id, Lead.call_count).where(
+                Lead.current_stage.in_(won_stages), Lead.voice_connected.is_(True)
+            ),
+            start,
+            end,
+        )
+    ).all()
+    if not vw:
+        return []
+    calls_by_pk = {pk: cc for pk, cc in vw}
+    pks = list(calls_by_pk)
+    stage_pks: dict[str, set[int]] = defaultdict(set)
+    # Chunk the IN() to stay within SQLite's parameter cap.
+    for i in range(0, len(pks), 800):
+        batch = pks[i : i + 800]
+        for pk, stage in db.execute(
+            select(StageEvent.lead_pk, StageEvent.stage).where(StageEvent.lead_pk.in_(batch))
+        ).all():
+            order = catalog.STAGE_ORDER.get(stage)
+            if order is None or order >= 100:
+                continue
+            stage_pks[stage].add(pk)
+
+    import statistics
+
     rows = []
-    for stage_name, pks_set in stage_pks.items():
-        calls = [pk_to_calls[pk] for pk in pks_set if pk_to_calls.get(pk)]
+    for stage_name, pk_set in stage_pks.items():
+        calls = [calls_by_pk[pk] for pk in pk_set if calls_by_pk.get(pk)]
         rows.append(
             {
                 "stage": stage_name,
-                "count": len(pks_set),
-                "count_label": indian_format(len(pks_set)),
+                "count": len(pk_set),
+                "count_label": indian_format(len(pk_set)),
                 "calls": round(statistics.median(calls), 1) if calls else 0,
             }
         )
@@ -520,10 +587,7 @@ def _stage_attribution(db: Session, voice_won: list[Lead]) -> list[dict]:
 # ─────────────────────────── data health ───────────────────────────
 def health(db: Session) -> dict:
     as_of = get_as_of(db)
-    drops = {
-        d.drop_date: d
-        for d in db.execute(select(DailyDrop)).scalars()
-    }
+    drops = {d.drop_date: d for d in db.execute(select(DailyDrop)).scalars()}
     days = []
     present = 0
     for i in range(30):
@@ -531,24 +595,25 @@ def health(db: Session) -> dict:
         drop = drops.get(d)
         if drop is None:
             status = "missing"
-        elif drop.status == "partial":
-            status = "partial"
-            present += 1
         else:
-            status = "received"
+            status = "partial" if drop.status == "partial" else "received"
             present += 1
         days.append({"date": d.strftime("%d %b"), "status": status})
     completeness = round(present / 30 * 100) if drops else 0
 
     na_rows = db.execute(select(func.count(Lead.id)).where(Lead.na_cells > 0)).scalar_one()
     overrides = get_overrides(db)
-    won_stages = [s for s, b in {**catalog.DEFAULT_BUCKET, **overrides}.items() if b == "won"]
-    zero_disb = db.execute(
-        select(func.count(Lead.id)).where(
-            Lead.current_stage.in_(won_stages),
-            (Lead.disbursed_amount.is_(None)) | (Lead.disbursed_amount == 0),
-        )
-    ).scalar_one() if won_stages else 0
+    won_stages = _won_stages(overrides)
+    zero_disb = (
+        db.execute(
+            select(func.count(Lead.id)).where(
+                Lead.current_stage.in_(won_stages),
+                or_(Lead.disbursed_amount.is_(None), Lead.disbursed_amount == 0),
+            )
+        ).scalar_one()
+        if won_stages
+        else 0
+    )
     backward = db.execute(select(func.count(Lead.id)).where(Lead.had_backward_move.is_(True))).scalar_one()
 
     flags = [
