@@ -423,10 +423,23 @@ def ingest_drop(
 
     for lid, v in by_id.items():
         stage = v["stage"]
+        # A genuine DIY sub-stage (not the #N/A sentinel, not "no column").
+        real_stage = stage if (stage and stage != catalog.NOT_IN_JOURNEY) else None
+        # An offer exists for this lead if the row carries offer terms.
+        has_offer = v["max_loan_amount"] is not None
         cur = existing.get(lid)
 
         if cur is None:
-            initial_stage = stage or fallback_stage
+            # Stage priority for a brand-new lead:
+            #   real DIY stage > has an offer ("Offer Generated") > sentinel > default.
+            if real_stage:
+                initial_stage = real_stage
+            elif has_offer:
+                initial_stage = "Offer Generated"
+            elif stage == catalog.NOT_IN_JOURNEY:
+                initial_stage = catalog.NOT_IN_JOURNEY
+            else:
+                initial_stage = fallback_stage
             new_lead_maps.append({
                 "lead_id": lid, "current_stage": initial_stage,
                 "entry_date": v["entry_date"] or the_date,
@@ -451,14 +464,26 @@ def ingest_drop(
             upd["voice_connected"] = True
         if v["call_count"] > (cur["call_count"] or 0):
             upd["call_count"] = v["call_count"]
-        if stage and stage != cur["current_stage"]:
-            event_maps.append({"lead_pk": cur["id"], "stage": stage, "observed_on": the_date})
-            prev_order = catalog.STAGE_ORDER.get(cur["current_stage"])
-            new_order = catalog.STAGE_ORDER.get(stage)
+
+        cur_stage = cur["current_stage"]
+        # Stage resolution:
+        #   • a real DIY stage always applies (transition + event);
+        #   • the #N/A sentinel never overwrites a known stage;
+        #   • an offer arriving for a "Not in DIY Journey" lead upgrades it to
+        #     "Offer Generated" (it demonstrably has an offer now).
+        applied_stage = None
+        if real_stage and real_stage != cur_stage:
+            applied_stage = real_stage
+        elif has_offer and cur_stage == catalog.NOT_IN_JOURNEY:
+            applied_stage = "Offer Generated"
+        if applied_stage:
+            event_maps.append({"lead_pk": cur["id"], "stage": applied_stage, "observed_on": the_date})
+            prev_order = catalog.STAGE_ORDER.get(cur_stage)
+            new_order = catalog.STAGE_ORDER.get(applied_stage)
             if prev_order is not None and new_order is not None and new_order < prev_order:
                 upd["had_backward_move"] = True
             if is_latest:
-                upd["current_stage"] = stage
+                upd["current_stage"] = applied_stage
                 upd["stage_entered_on"] = the_date
         if is_latest:
             upd["last_seen_on"] = the_date

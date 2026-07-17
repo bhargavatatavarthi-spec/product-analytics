@@ -102,6 +102,49 @@ def test_emi_computed_from_terms():
     assert res.ok and abs(res.values["emi"] - 11826.83) < 1
 
 
+def _offer(lid, amount="250000"):
+    return (f"name,max_loan_amount,max_tenure_months,processing_fee,scheme_id,internal_id,roi\n"
+            f"REDACTED,{amount},24,0.02,11888,{lid},0.125\n").encode()
+
+def _journey_na(lid):
+    return (f"INTERNAL_ID,LAST_CALL_OUTCOME,CONNECTED_AT_LEAST_ONCE,DIY Sub-Stage,Disbursement Amount,Created Date\n"
+            f"{lid},Not Interested,Yes,#N/A,#N/A,#N/A\n").encode()
+
+
+def test_offer_upgrades_sentinel_journey_first(db):
+    from sqlalchemy import select
+    # Journey #N/A first -> sentinel; offer arrives -> upgrades to Offer Generated.
+    ingest.ingest_drop(db, _journey_na("L1"), filename="j.csv", drop_date=date(2026, 7, 17))
+    assert db.execute(select(Lead).where(Lead.lead_id == "L1")).scalar_one().current_stage == "Not in DIY Journey"
+    ingest.ingest_drop(db, _offer("L1"), filename="o.csv", drop_date=date(2026, 7, 17))
+    assert db.execute(select(Lead).where(Lead.lead_id == "L1")).scalar_one().current_stage == "Offer Generated"
+
+
+def test_offer_first_then_na_journey_keeps_offer_generated(db):
+    from sqlalchemy import select
+    ingest.ingest_drop(db, _offer("L2"), filename="o.csv", drop_date=date(2026, 7, 17))
+    assert db.execute(select(Lead).where(Lead.lead_id == "L2")).scalar_one().current_stage == "Offer Generated"
+    # A later #N/A journey row must NOT downgrade an offer-holding lead.
+    ingest.ingest_drop(db, _journey_na("L2"), filename="j.csv", drop_date=date(2026, 7, 18))
+    assert db.execute(select(Lead).where(Lead.lead_id == "L2")).scalar_one().current_stage == "Offer Generated"
+
+
+def test_dial_only_lead_stays_not_in_journey(db):
+    from sqlalchemy import select
+    # Dialed, #N/A stage, and NO offer feed -> stays Not in DIY Journey.
+    ingest.ingest_drop(db, _journey_na("L3"), filename="j.csv", drop_date=date(2026, 7, 17))
+    assert db.execute(select(Lead).where(Lead.lead_id == "L3")).scalar_one().current_stage == "Not in DIY Journey"
+
+
+def test_real_stage_not_downgraded_by_na(db):
+    from sqlalchemy import select
+    j = ("INTERNAL_ID,LAST_CALL_OUTCOME,CONNECTED_AT_LEAST_ONCE,DIY Sub-Stage,Disbursement Amount,Created Date\n"
+         "L4,Interested,Yes,OFFER_SELECTED,#N/A,10-07-2026\n").encode()
+    ingest.ingest_drop(db, j, filename="j.csv", drop_date=date(2026, 7, 17))
+    ingest.ingest_drop(db, _journey_na("L4"), filename="j2.csv", drop_date=date(2026, 7, 18))
+    assert db.execute(select(Lead).where(Lead.lead_id == "L4")).scalar_one().current_stage == "Offer Selected"
+
+
 def test_detect_dayfirst():
     assert ingest.detect_dayfirst(["6/18/2026", "6/15/2026"]) is False  # month-first
     assert ingest.detect_dayfirst(["18/06/2026", "15/06/2026"]) is True  # day-first
