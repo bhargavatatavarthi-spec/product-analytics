@@ -61,6 +61,34 @@ def test_na_substage_becomes_sentinel(db):
     assert leads["u1"].na_cells == 0
 
 
+def test_real_offer_headers_and_roi_fraction():
+    headers = ["name", "max_loan_amount", "max_tenure_months", "processing_fee",
+               "scheme_id", "internal_id", "roi"]
+    m = ingest.suggest_mapping(headers)
+    assert m["lead_id"] == "internal_id"
+    assert m["schemecode"] == "scheme_id"
+    assert m["stage"] is None  # offer feed has no stage
+    # ROI stored as a fraction in the offer feed -> normalized to percent.
+    assert ingest.coerce_roi("0.115") == 11.5
+    assert ingest.coerce_roi("11.5") == 11.5
+
+
+def test_offer_feed_joins_onto_journey_lead(db):
+    from sqlalchemy import select
+    j = ("INTERNAL_ID,LAST_CALL_OUTCOME,CONNECTED_AT_LEAST_ONCE,DIY Sub-Stage,Disbursement Amount,Created Date\n"
+         "X1,Interested,Yes,DISBURSEMENT_COMPLETED,250000,14-07-2026\n")
+    o = ("name,max_loan_amount,max_tenure_months,processing_fee,scheme_id,internal_id,roi\n"
+         "REDACTED,250000,24,0.02,11888,X1,0.125\n")
+    ingest.ingest_drop(db, j.encode(), filename="j.csv", drop_date=date(2026, 7, 17))
+    r = ingest.ingest_drop(db, o.encode(), filename="o.csv", drop_date=date(2026, 7, 17))
+    assert r["new_leads"] == 0 and r["updated_leads"] == 1  # joined, not duplicated
+    lead = db.execute(select(Lead).where(Lead.lead_id == "X1")).scalar_one()
+    assert lead.current_stage == "Disbursement Completed"  # from journey feed
+    assert lead.max_loan_amount == 250000                  # from offer feed
+    assert lead.roi == 12.5                                # fraction -> percent
+    assert lead.schemecode == "11888"
+
+
 def test_detect_dayfirst():
     assert ingest.detect_dayfirst(["6/18/2026", "6/15/2026"]) is False  # month-first
     assert ingest.detect_dayfirst(["18/06/2026", "15/06/2026"]) is True  # day-first

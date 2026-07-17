@@ -40,7 +40,7 @@ FIELD_ALIASES: dict[str, list[str]] = {
     "roi": ["roi", "rate_of_interest", "interest_rate", "rate"],
     "emi": ["emi", "emi_amount", "monthly_emi", "installment"],
     "processing_fee": ["processing_fee", "processing_fees", "proc_fee", "pf"],
-    "schemecode": ["schemecode", "scheme_code", "scheme", "product_code", "product"],
+    "schemecode": ["schemecode", "scheme_code", "scheme_id", "schemeid", "scheme", "product_code", "product"],
     "voice_connected": ["connected_at_least_once", "voice_connected", "connected", "ai_connected", "is_connected"],
     "call_count": ["call_count", "calls", "num_calls", "attempts", "dial_count"],
     "last_disposition": ["last_call_outcome", "last_disposition", "disposition", "call_disposition", "outcome", "call_outcome"],
@@ -127,6 +127,15 @@ def coerce_float(value: str | None) -> float | None:
 def coerce_int(value: str | None) -> int | None:
     f = coerce_float(value)
     return int(f) if f is not None else None
+
+
+def coerce_roi(value: str | None) -> float | None:
+    """ROI to a percentage. The offer feed stores it as a fraction (0.115),
+    other exports as a percent (11.5) — normalize any 0<roi<=1 to percent."""
+    f = coerce_float(value)
+    if f is None:
+        return None
+    return round(f * 100, 2) if 0 < f <= 1 else f
 
 
 def coerce_bool(value: str | None) -> bool:
@@ -230,7 +239,7 @@ def extract_row(
         "disbursed_amount": coerce_float(raw("disbursed_amount")),
         "max_loan_amount": coerce_float(raw("max_loan_amount")),
         "max_tenure_months": coerce_float(raw("max_tenure_months")),
-        "roi": coerce_float(raw("roi")),
+        "roi": coerce_roi(raw("roi")),
         "emi": coerce_float(raw("emi")),
         "processing_fee": coerce_float(raw("processing_fee")),
         "schemecode": None if is_na(raw("schemecode")) else raw("schemecode").strip(),

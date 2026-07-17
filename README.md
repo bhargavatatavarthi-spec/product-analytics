@@ -22,11 +22,12 @@ Kotak delivers **two daily files ("drops")**, joined on the offer/lead id:
 | Feed | Columns (real export headers) | Purpose |
 |------|---------|---------|
 | **Journey feed** | `INTERNAL_ID, LAST_CALL_OUTCOME, CONNECTED_AT_LEAST_ONCE, DIY Sub-Stage, Disbursement Amount, Created Date` | Stage, entry date, call outcome, voice-touched flag, disbursed amount |
-| **Offer feed** | `offerid, name, mobile, max_loan_amount, max_tenure_months, roi, EMI, processing_fee, schemecode` | Offer terms per lead |
+| **Offer feed** | `internal_id, name, max_loan_amount, max_tenure_months, processing_fee, scheme_id, roi` | Offer terms per lead |
 
 The importer's fuzzy column matching handles both these headers and common
-variants automatically. A real journey drop is ~350k rows / ~26 MB; import runs
-in ~30s and matched every stage in the sample with zero errors.
+variants automatically, joining the feeds on `internal_id`. Real drops are
+~350k rows / ~30 MB each; each imports in ~30–35s with zero errors. ROI stored
+as a fraction (`0.115`) is normalized to percent (`11.5`).
 
 Key ideas:
 
