@@ -80,9 +80,15 @@ docker compose up --build
 ## Deploy anywhere
 
 The single image serves both API and frontend and honours `$PORT`, so it drops
-straight onto Render, Railway, Fly.io, Cloud Run, or any container host. For a
-production database, point `KPAL_DATABASE_URL` at Postgres/MySQL — SQLAlchemy
-handles the rest, no code change:
+straight onto Render, Railway, Fly.io, Cloud Run, or any container host.
+
+**One-click on Render:** this repo ships a [`render.yaml`](./render.yaml)
+Blueprint. In Render: **New → Blueprint → pick this repo**. It provisions a
+Docker web service with a 1 GB persistent disk for the SQLite DB and a
+`/api/ping` health check — no further config needed.
+
+For a production database, point `KPAL_DATABASE_URL` at Postgres/MySQL —
+SQLAlchemy handles the rest, no code change:
 
 ```bash
 KPAL_DATABASE_URL="postgresql+psycopg://user:pass@host:5432/kpal"
