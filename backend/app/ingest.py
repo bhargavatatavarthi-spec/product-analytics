@@ -13,6 +13,7 @@ import io
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from itertools import chain as _chain, islice as _islice
 
 from dateutil import parser as dateparser
 from sqlalchemy import select
@@ -88,19 +89,39 @@ def suggest_mapping(headers: list[str]) -> dict[str, str | None]:
     return mapping
 
 
-def parse_csv(raw: bytes) -> tuple[list[str], list[dict[str, str]]]:
-    """Decode + parse a CSV into (headers, list-of-row-dicts)."""
-    text = raw.decode("utf-8-sig", errors="replace")
-    # Sniff the delimiter; fall back to comma.
-    sample = text[:4096]
+def _dialect(text: str):
     try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        return csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
     except csv.Error:
-        dialect = csv.excel
-    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+        return csv.excel
+
+
+def open_reader(raw: bytes):
+    """Return (headers, row-iterator) without materializing all rows — lets the
+    preview and import stream a 350k-row file in constant memory."""
+    text = raw.decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(text), dialect=_dialect(text))
     headers = [h for h in (reader.fieldnames or []) if h is not None]
-    rows = [dict(r) for r in reader]
-    return headers, rows
+    return headers, reader
+
+
+def parse_csv(raw: bytes) -> tuple[list[str], list[dict[str, str]]]:
+    """Decode + parse a CSV into (headers, list-of-row-dicts). Convenience for
+    small inputs / tests; the import path streams via open_reader instead."""
+    headers, reader = open_reader(raw)
+    return headers, [dict(r) for r in reader]
+
+
+def _chunks(iterator, size: int):
+    """Yield lists of up to `size` items from an iterator."""
+    chunk: list = []
+    for item in iterator:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def is_na(value: str | None) -> bool:
@@ -290,16 +311,23 @@ def _dayfirst_for(rows: list[dict[str, str]], mapping: dict[str, str | None]) ->
 
 
 def build_preview(raw: bytes, mapping: dict[str, str | None] | None = None, limit: int = 8) -> dict:
-    """Parse just enough to show the user a mapping + sample before committing."""
-    headers, rows = parse_csv(raw)
+    """Stream the file to show a mapping + sample before committing.
+
+    Constant-memory: samples the first chunk for date-format detection and only
+    keeps `limit` example rows, counting the rest without materializing them.
+    """
+    headers, reader = open_reader(raw)
     mapping = _resolve_mapping(headers, mapping)
-    dayfirst = _dayfirst_for(rows, mapping)
+
+    first = list(_islice(reader, 500))
+    dayfirst = _dayfirst_for(first, mapping)
 
     missing_required = [f for f in REQUIRED_FIELDS if not mapping.get(f)]
     has_stage = bool(mapping.get("stage"))
     sample: list[dict] = []
-    ok_count = 0
-    for r in rows:
+    ok_count = total = 0
+    for r in _chain(first, reader):
+        total += 1
         res = extract_row(r, mapping, dayfirst)
         if res.ok:
             ok_count += 1
@@ -314,9 +342,9 @@ def build_preview(raw: bytes, mapping: dict[str, str | None] | None = None, limi
         "dayfirst": dayfirst,
         "has_stage": has_stage,
         "default_stage": DEFAULT_STAGE,
-        "total_rows": len(rows),
+        "total_rows": total,
         "valid_rows": ok_count,
-        "invalid_rows": len(rows) - ok_count,
+        "invalid_rows": total - ok_count,
         "sample": sample,
     }
 
@@ -360,163 +388,201 @@ def ingest_drop(
     Idempotent per drop_date: re-importing the same date updates existing leads
     rather than duplicating them.
     """
-    headers, rows = parse_csv(raw)
+    headers, reader = open_reader(raw)
     resolved_mapping = _resolve_mapping(headers, mapping)
 
     missing_required = [f for f in REQUIRED_FIELDS if not resolved_mapping.get(f)]
     if missing_required:
         raise ValueError(f"Cannot import: missing required column(s): {', '.join(missing_required)}")
 
-    dayfirst = _dayfirst_for(rows, resolved_mapping)
     fallback_stage = default_stage or DEFAULT_STAGE
-
-    parsed: list[dict] = []
-    error_rows = 0
-    for r in rows:
-        res = extract_row(r, resolved_mapping, dayfirst)
-        if res.ok:
-            parsed.append(res.values)
-        else:
-            error_rows += 1
-
-    the_date = _resolve_drop_date(parsed, filename, drop_date)
-
-    # Upsert the DailyDrop record (a date may receive both feeds).
-    drop = db.execute(select(DailyDrop).where(DailyDrop.drop_date == the_date)).scalar_one_or_none()
-    if drop is None:
-        drop = DailyDrop(drop_date=the_date)
-        db.add(drop)
-    drop.filename = filename or drop.filename
-    drop.row_count = len(parsed)
-    drop.error_rows = error_rows
-    drop.status = "partial" if error_rows else "received"
-
-    db.flush()  # persist the DailyDrop before the bulk ops below
-
-    # De-duplicate within the file (a snapshot should be unique per lead; last wins).
-    by_id: dict[str, dict] = {}
-    for v in parsed:
-        by_id[v["lead_id"]] = v
-
-    new_stages = sorted({
-        v["stage"] for v in by_id.values()
-        if v["stage"] and v["stage"] not in catalog.STAGE_ORDER
-    })
-
     META_FIELDS = ("max_loan_amount", "max_tenure_months", "roi", "emi",
                    "processing_fee", "schemecode", "disbursed_amount", "last_disposition")
-
-    # Load existing leads as lightweight rows (no ORM identity map / dirty tracking).
     cols = (Lead.id, Lead.lead_id, Lead.current_stage, Lead.stage_entered_on,
             Lead.last_seen_on, Lead.entry_date, Lead.first_seen_on, Lead.na_cells,
-            Lead.voice_connected, Lead.call_count, *[getattr(Lead, f) for f in META_FIELDS])
-    existing: dict[str, dict] = {}
-    if by_id:
-        for row in db.execute(select(*cols)).mappings():
-            if row["lead_id"] in by_id:
-                existing[row["lead_id"]] = row
+            Lead.voice_connected, Lead.call_count, Lead.had_backward_move,
+            *[getattr(Lead, f) for f in META_FIELDS])
 
-    new_lead_maps: list[dict] = []
-    update_maps: list[dict] = []
-    new_lead_stage: list[tuple[str, str]] = []   # (lead_id, initial_stage)
-    event_maps: list[dict] = []                  # transition events for existing leads
+    # Chunk size stays within SQLite's 999 bound-parameter cap for the IN(...)
+    # look-ups, and keeps peak memory flat regardless of file size.
+    CHUNK = 900
+    # Peek the first chunk to detect date orientation without reading it all.
+    first = list(_islice(reader, CHUNK))
+    dayfirst = _dayfirst_for(first, resolved_mapping)
 
-    for lid, v in by_id.items():
-        stage = v["stage"]
-        # A genuine DIY sub-stage (not the #N/A sentinel, not "no column").
-        real_stage = stage if (stage and stage != catalog.NOT_IN_JOURNEY) else None
-        # An offer exists for this lead if the row carries offer terms.
-        has_offer = v["max_loan_amount"] is not None
-        cur = existing.get(lid)
+    totals = {"total": 0, "imported": 0, "error": 0, "new": 0, "updated": 0}
+    new_stages: set[str] = set()
+    state: dict = {"date": drop_date, "drop": None, "since_commit": 0}
 
-        if cur is None:
-            # Stage priority for a brand-new lead:
-            #   real DIY stage > has an offer ("Offer Generated") > sentinel > default.
-            if real_stage:
-                initial_stage = real_stage
-            elif has_offer:
-                initial_stage = "Offer Generated"
-            elif stage == catalog.NOT_IN_JOURNEY:
-                initial_stage = catalog.NOT_IN_JOURNEY
+    def process_chunk(raw_rows: list[dict]) -> None:
+        parsed: list[dict] = []
+        for r in raw_rows:
+            totals["total"] += 1
+            res = extract_row(r, resolved_mapping, dayfirst)
+            if res.ok:
+                parsed.append(res.values)
             else:
-                initial_stage = fallback_stage
-            new_lead_maps.append({
-                "lead_id": lid, "current_stage": initial_stage,
-                "entry_date": v["entry_date"] or the_date,
-                "stage_entered_on": the_date, "first_seen_on": the_date, "last_seen_on": the_date,
-                "voice_connected": v["voice_connected"], "call_count": v["call_count"],
-                "na_cells": v["na_cells"], "had_backward_move": False,
-                **{f: v[f] for f in META_FIELDS},
-            })
-            new_lead_stage.append((lid, initial_stage))
-            continue
+                totals["error"] += 1
+        if not parsed:
+            return
 
-        upd: dict = {"id": cur["id"], "first_seen_on": min(cur["first_seen_on"] or the_date, the_date)}
-        if v["entry_date"]:
-            upd["entry_date"] = min(cur["entry_date"] or v["entry_date"], v["entry_date"])
-        if v["na_cells"]:
-            upd["na_cells"] = (cur["na_cells"] or 0) + v["na_cells"]
-        is_latest = the_date >= (cur["last_seen_on"] or the_date)
-        for fld in META_FIELDS:
-            if v[fld] is not None and (is_latest or cur[fld] is None):
-                upd[fld] = v[fld]
-        if v["voice_connected"] and not cur["voice_connected"]:
-            upd["voice_connected"] = True
-        if v["call_count"] > (cur["call_count"] or 0):
-            upd["call_count"] = v["call_count"]
+        # Resolve the drop date + DailyDrop record once, on the first data chunk.
+        if state["drop"] is None:
+            the_date = _resolve_drop_date(parsed, filename, drop_date)
+            state["date"] = the_date
+            drop = db.execute(select(DailyDrop).where(DailyDrop.drop_date == the_date)).scalar_one_or_none()
+            if drop is None:
+                drop = DailyDrop(drop_date=the_date)
+                db.add(drop)
+            drop.filename = filename or drop.filename
+            db.flush()
+            state["drop"] = drop
+        the_date = state["date"]
 
-        cur_stage = cur["current_stage"]
-        # Stage resolution:
-        #   • a real DIY stage always applies (transition + event);
-        #   • the #N/A sentinel never overwrites a known stage;
-        #   • an offer arriving for a "Not in DIY Journey" lead upgrades it to
-        #     "Offer Generated" (it demonstrably has an offer now).
-        applied_stage = None
-        if real_stage and real_stage != cur_stage:
-            applied_stage = real_stage
-        elif has_offer and cur_stage == catalog.NOT_IN_JOURNEY:
-            applied_stage = "Offer Generated"
-        if applied_stage:
-            event_maps.append({"lead_pk": cur["id"], "stage": applied_stage, "observed_on": the_date})
-            prev_order = catalog.STAGE_ORDER.get(cur_stage)
-            new_order = catalog.STAGE_ORDER.get(applied_stage)
-            if prev_order is not None and new_order is not None and new_order < prev_order:
-                upd["had_backward_move"] = True
-            if is_latest:
-                upd["current_stage"] = applied_stage
-                upd["stage_entered_on"] = the_date
-        if is_latest:
-            upd["last_seen_on"] = the_date
-        update_maps.append(upd)
+        # De-dup within the chunk; cross-chunk dedup happens naturally because a
+        # repeated lead is already persisted (and thus "existing") next time.
+        by_id: dict[str, dict] = {}
+        for v in parsed:
+            by_id[v["lead_id"]] = v
+        for v in by_id.values():
+            if v["stage"] and v["stage"] not in catalog.STAGE_ORDER:
+                new_stages.add(v["stage"])
 
-    new_leads = len(new_lead_maps)
-    updated_leads = len(update_maps)
+        ids = list(by_id)
+        existing = {
+            row["lead_id"]: row
+            for row in db.execute(select(*cols).where(Lead.lead_id.in_(ids))).mappings()
+        }
 
-    # Bulk persist. bulk_* bypass the unit-of-work for speed on 350k-row drops.
-    if new_lead_maps:
-        db.bulk_insert_mappings(Lead, new_lead_maps)
-        db.flush()
-        idmap = {r["lead_id"]: r["id"] for r in db.execute(select(Lead.id, Lead.lead_id)).mappings()}
-        event_maps.extend(
-            {"lead_pk": idmap[lid], "stage": st, "observed_on": the_date}
-            for lid, st in new_lead_stage
-        )
-    if update_maps:
-        db.bulk_update_mappings(Lead, update_maps)
-    if event_maps:
-        db.bulk_insert_mappings(StageEvent, event_maps)
+        new_lead_maps: list[dict] = []
+        update_maps: list[dict] = []
+        new_lead_stage: list[tuple[str, str]] = []
+        event_maps: list[dict] = []
 
+        for lid, v in by_id.items():
+            stage = v["stage"]
+            real_stage = stage if (stage and stage != catalog.NOT_IN_JOURNEY) else None
+            has_offer = v["max_loan_amount"] is not None
+            cur = existing.get(lid)
+
+            if cur is None:
+                if real_stage:
+                    initial_stage = real_stage
+                elif has_offer:
+                    initial_stage = "Offer Generated"
+                elif stage == catalog.NOT_IN_JOURNEY:
+                    initial_stage = catalog.NOT_IN_JOURNEY
+                else:
+                    initial_stage = fallback_stage
+                new_lead_maps.append({
+                    "lead_id": lid, "current_stage": initial_stage,
+                    "entry_date": v["entry_date"] or the_date,
+                    "stage_entered_on": the_date, "first_seen_on": the_date, "last_seen_on": the_date,
+                    "voice_connected": v["voice_connected"], "call_count": v["call_count"],
+                    "na_cells": v["na_cells"], "had_backward_move": False,
+                    **{f: v[f] for f in META_FIELDS},
+                })
+                new_lead_stage.append((lid, initial_stage))
+                continue
+
+            is_latest = the_date >= (cur["last_seen_on"] or the_date)
+            cur_stage = cur["current_stage"]
+            applied_stage = None
+            if real_stage and real_stage != cur_stage:
+                applied_stage = real_stage
+            elif has_offer and cur_stage == catalog.NOT_IN_JOURNEY:
+                applied_stage = "Offer Generated"
+
+            backward = bool(cur["had_backward_move"])
+            if applied_stage:
+                event_maps.append({"lead_pk": cur["id"], "stage": applied_stage, "observed_on": the_date})
+                prev_order = catalog.STAGE_ORDER.get(cur_stage)
+                new_order = catalog.STAGE_ORDER.get(applied_stage)
+                if prev_order is not None and new_order is not None and new_order < prev_order:
+                    backward = True
+            stage_changes = applied_stage is not None and is_latest
+
+            # Uniform key set on every update dict: unchanged columns are written
+            # back with their current value. This keeps bulk_update_mappings to a
+            # single cached statement (varying key-sets otherwise explode the
+            # compiled-statement cache to hundreds of MB on a 350k-row update).
+            upd: dict = {
+                "id": cur["id"],
+                "first_seen_on": min(cur["first_seen_on"] or the_date, the_date),
+                "last_seen_on": the_date if is_latest else cur["last_seen_on"],
+                "entry_date": (min(cur["entry_date"] or v["entry_date"], v["entry_date"])
+                               if v["entry_date"] else cur["entry_date"]),
+                "na_cells": (cur["na_cells"] or 0) + v["na_cells"],
+                "voice_connected": bool(cur["voice_connected"]) or v["voice_connected"],
+                "call_count": max(cur["call_count"] or 0, v["call_count"]),
+                "current_stage": applied_stage if stage_changes else cur_stage,
+                "stage_entered_on": the_date if stage_changes else cur["stage_entered_on"],
+                "had_backward_move": backward,
+            }
+            for fld in META_FIELDS:
+                upd[fld] = v[fld] if (v[fld] is not None and (is_latest or cur[fld] is None)) else cur[fld]
+            update_maps.append(upd)
+
+        totals["new"] += len(new_lead_maps)
+        totals["updated"] += len(update_maps)
+        totals["imported"] += len(by_id)
+
+        if new_lead_maps:
+            db.bulk_insert_mappings(Lead, new_lead_maps)
+            db.flush()
+            new_ids = [m["lead_id"] for m in new_lead_maps]
+            idmap = {
+                r["lead_id"]: r["id"]
+                for r in db.execute(select(Lead.id, Lead.lead_id).where(Lead.lead_id.in_(new_ids))).mappings()
+            }
+            event_maps.extend(
+                {"lead_pk": idmap[lid], "stage": st, "observed_on": the_date}
+                for lid, st in new_lead_stage
+            )
+        if update_maps:
+            db.bulk_update_mappings(Lead, update_maps)
+        if event_maps:
+            db.bulk_insert_mappings(StageEvent, event_maps)
+        # Commit periodically so SQLite flushes dirty pages to disk rather than
+        # holding the whole file's transaction in memory. Batching (vs per-chunk)
+        # keeps fsync overhead low while peak RSS stays flat.
+        state["since_commit"] += 1
+        if state["since_commit"] >= 25:
+            db.commit()
+            state["since_commit"] = 0
+        else:
+            db.flush()
+
+    process_chunk(first)
+    for chunk in _chunks(reader, CHUNK):
+        process_chunk(chunk)
+
+    # Empty / all-invalid file: still record the drop so the ledger shows it.
+    if state["drop"] is None:
+        the_date = _resolve_drop_date([], filename, drop_date)
+        state["date"] = the_date
+        drop = db.execute(select(DailyDrop).where(DailyDrop.drop_date == the_date)).scalar_one_or_none()
+        if drop is None:
+            drop = DailyDrop(drop_date=the_date)
+            db.add(drop)
+        drop.filename = filename or drop.filename
+        state["drop"] = drop
+
+    drop = state["drop"]
+    drop.row_count = totals["imported"]
+    drop.error_rows = totals["error"]
+    drop.status = "partial" if totals["error"] else "received"
     db.commit()
 
     return {
-        "drop_date": the_date.isoformat(),
+        "drop_date": state["date"].isoformat(),
         "filename": filename,
         "status": drop.status,
-        "total_rows": len(rows),
-        "imported_rows": len(parsed),
-        "error_rows": error_rows,
-        "new_leads": new_leads,
-        "updated_leads": updated_leads,
+        "total_rows": totals["total"],
+        "imported_rows": totals["imported"],
+        "error_rows": totals["error"],
+        "new_leads": totals["new"],
+        "updated_leads": totals["updated"],
         "new_unmapped_stages": sorted(new_stages),
         "mapping": resolved_mapping,
     }

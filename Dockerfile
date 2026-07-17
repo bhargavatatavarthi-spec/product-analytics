@@ -4,7 +4,11 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     KPAL_DATA_DIR=/data \
-    KPAL_FRONTEND_DIR=/app/frontend
+    KPAL_FRONTEND_DIR=/app/frontend \
+    # Cap glibc malloc arenas: without this, a 350k-row import fragments across
+    # many per-thread arenas and peaks ~775 MB; capped it peaks ~226 MB (fits a
+    # 512 MB free tier).
+    MALLOC_ARENA_MAX=2
 
 WORKDIR /app
 

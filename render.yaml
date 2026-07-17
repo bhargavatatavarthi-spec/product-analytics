@@ -10,10 +10,9 @@ services:
   - type: web
     name: kotak-pal-journey-analyzer
     runtime: docker
-    # 2 GB instance: importing a ~360k-row daily drop peaks well above the
-    # 512 MB starter plan. Drop to "starter" only if you'll use demo data /
-    # small imports.
-    plan: standard
+    # Free/starter tier is enough: the importer streams the file in chunks and
+    # commits per batch, so a ~360k-row daily drop stays within 512 MB.
+    plan: starter
     healthCheckPath: /api/ping
     autoDeploy: true
     envVars:

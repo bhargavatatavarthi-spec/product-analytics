@@ -26,8 +26,10 @@ Kotak delivers **two daily files ("drops")**, joined on the offer/lead id:
 
 The importer's fuzzy column matching handles both these headers and common
 variants automatically, joining the feeds on `internal_id`. Real drops are
-~350k rows / ~30 MB each; each imports in ~30–35s with zero errors. ROI stored
-as a fraction (`0.115`) is normalized to percent (`11.5`).
+~350k rows / ~30 MB each; the file is **streamed and committed in chunks**
+(with `MALLOC_ARENA_MAX=2` to keep glibc from fragmenting), so a full drop
+imports in ~30–60s within ~230 MB of RAM (fits a 512 MB free tier).
+ROI stored as a fraction (`0.115`) is normalized to percent (`11.5`).
 
 Key ideas:
 
