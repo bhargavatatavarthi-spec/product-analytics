@@ -1,0 +1,28 @@
+# Render.com Blueprint — one-click deploy of the Kotak PAL Journey Analyzer.
+# In Render: New → Blueprint → point at this repo. The single Docker image
+# serves both the API and the static dashboard; $PORT is injected by Render and
+# honoured by the Dockerfile. SQLite persists on the attached disk.
+#
+# To use a managed Postgres instead of SQLite, add a `databases:` block and set
+# KPAL_DATABASE_URL from its connectionString (SQLAlchemy needs the
+# `postgresql+psycopg://` scheme).
+services:
+  - type: web
+    name: kotak-pal-journey-analyzer
+    runtime: docker
+    # Free/starter tier is enough: the importer streams the file in chunks and
+    # commits per batch, so a ~360k-row daily drop stays within 512 MB.
+    plan: starter
+    healthCheckPath: /api/ping
+    autoDeploy: true
+    envVars:
+      # Start empty so you import your real feeds via the UI. Set to "1" for a
+      # synthetic demo dataset instead.
+      - key: KPAL_SEED_DEMO
+        value: "0"
+      - key: KPAL_DATA_DIR
+        value: /data
+    disk:
+      name: kpal-data
+      mountPath: /data
+      sizeGB: 1

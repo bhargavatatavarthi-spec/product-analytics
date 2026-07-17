@@ -1,0 +1,16 @@
+services:
+  analyzer:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Seed synthetic demo data on first boot. Set to 0 to start empty.
+      KPAL_SEED_DEMO: "1"
+      # Swap in Postgres/MySQL by pointing this at a real DSN, e.g.
+      # KPAL_DATABASE_URL: "postgresql+psycopg://user:pass@db:5432/kpal"
+    volumes:
+      - kpal-data:/data
+    restart: unless-stopped
+
+volumes:
+  kpal-data:
