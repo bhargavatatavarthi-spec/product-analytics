@@ -10,12 +10,17 @@ services:
   - type: web
     name: kotak-pal-journey-analyzer
     runtime: docker
-    plan: starter
+    # 2 GB instance: importing a ~360k-row daily drop peaks well above the
+    # 512 MB starter plan. Drop to "starter" only if you'll use demo data /
+    # small imports.
+    plan: standard
     healthCheckPath: /api/ping
     autoDeploy: true
     envVars:
+      # Start empty so you import your real feeds via the UI. Set to "1" for a
+      # synthetic demo dataset instead.
       - key: KPAL_SEED_DEMO
-        value: "1"          # set to "0" to start with an empty dataset
+        value: "0"
       - key: KPAL_DATA_DIR
         value: /data
     disk:
