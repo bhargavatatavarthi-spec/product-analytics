@@ -17,12 +17,16 @@ reads from the API.
 
 ## How the data works
 
-Kotak delivers **two daily files ("drops")**, joined on `offer_id`:
+Kotak delivers **two daily files ("drops")**, joined on the offer/lead id:
 
-| Feed | Columns | Purpose |
+| Feed | Columns (real export headers) | Purpose |
 |------|---------|---------|
+| **Journey feed** | `INTERNAL_ID, LAST_CALL_OUTCOME, CONNECTED_AT_LEAST_ONCE, DIY Sub-Stage, Disbursement Amount, Created Date` | Stage, entry date, call outcome, voice-touched flag, disbursed amount |
 | **Offer feed** | `offerid, name, mobile, max_loan_amount, max_tenure_months, roi, EMI, processing_fee, schemecode` | Offer terms per lead |
-| **Journey feed** | `offer_id, last_call_outcome, Created Date, DIY Sub-stage, DIS VALUE` | Stage, entry date, call outcome, disbursed amount |
+
+The importer's fuzzy column matching handles both these headers and common
+variants automatically. A real journey drop is ~350k rows / ~26 MB; import runs
+in ~30s and matched every stage in the sample with zero errors.
 
 Key ideas:
 
@@ -36,9 +40,15 @@ Key ideas:
   leads at a default stage; the journey feed drives the real stage. They merge
   on `offer_id`.
 - **No PII stored.** `name` and `mobile` are ignored — they power no insight.
-- **Forgiving parser.** Fuzzy column auto-mapping, `₹`/`%`/comma stripping,
-  `#N/A` handling, and date-format auto-detection (`Created Date` is `M/D/YYYY`,
-  not `D/M`).
+- **`#N/A` is a null, not an error.** Clients use `#N/A` pervasively as their
+  empty token, so it is treated as absence (only real cell errors like
+  `#VALUE!`/`#REF!` are flagged in Data Health).
+- **Leads with no journey stage** (`DIY Sub-Stage = #N/A`) — the ~98% of dialed
+  leads not (yet) in the offer journey — are recorded as **"Not in DIY Journey"**
+  (Unclassified). Their call outcomes still feed Attribution; they're excluded
+  from Won/In-flight/Lost until an analyst decides otherwise in Stage Explorer.
+- **Forgiving parser.** Fuzzy column auto-mapping, `₹`/`%`/comma stripping, and
+  date-format **auto-detection** (handles both `DD-MM-YYYY` and `M/D/YYYY`).
 
 ### What each field powers
 

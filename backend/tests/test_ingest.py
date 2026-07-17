@@ -30,6 +30,37 @@ def test_suggest_mapping_matches_real_headers():
     assert m["last_disposition"] == "last_call_outcome"
 
 
+def test_real_kotak_journey_headers():
+    # Exact headers from the real 17TH_JULY_SS.csv export.
+    headers = ["INTERNAL_ID", "LAST_CALL_OUTCOME", "CONNECTED_AT_LEAST_ONCE",
+               "DIY Sub-Stage", "Disbursement Amount", "Created Date"]
+    m = ingest.suggest_mapping(headers)
+    assert m["lead_id"] == "INTERNAL_ID"
+    assert m["voice_connected"] == "CONNECTED_AT_LEAST_ONCE"
+    assert m["stage"] == "DIY Sub-Stage"
+    assert m["disbursed_amount"] == "Disbursement Amount"
+    assert m["entry_date"] == "Created Date"
+    assert m["last_disposition"] == "LAST_CALL_OUTCOME"
+
+
+def test_na_substage_becomes_sentinel(db):
+    from app import catalog
+    csv = (
+        "INTERNAL_ID,LAST_CALL_OUTCOME,CONNECTED_AT_LEAST_ONCE,DIY Sub-Stage,Disbursement Amount,Created Date\n"
+        "u1,Not Interested,Yes,#N/A,#N/A,#N/A\n"
+        "u2,Phone Busy,No,DISBURSEMENT_COMPLETED,25000,14-07-2026\n"
+    )
+    ingest.ingest_drop(db, csv.encode(), filename="17TH_JULY_SS.csv", drop_date=date(2026, 7, 17))
+    leads = {l.lead_id: l for l in db.execute(select(Lead)).scalars()}
+    assert leads["u1"].current_stage == catalog.NOT_IN_JOURNEY  # dialed, no journey
+    assert leads["u1"].voice_connected is True                   # CONNECTED = Yes
+    assert leads["u2"].current_stage == "Disbursement Completed"
+    assert leads["u2"].voice_connected is False                  # CONNECTED = No
+    assert leads["u2"].entry_date == date(2026, 7, 14)           # DD-MM-YYYY
+    # #N/A is a null token, not a flagged cell error.
+    assert leads["u1"].na_cells == 0
+
+
 def test_detect_dayfirst():
     assert ingest.detect_dayfirst(["6/18/2026", "6/15/2026"]) is False  # month-first
     assert ingest.detect_dayfirst(["18/06/2026", "15/06/2026"]) is True  # day-first
@@ -93,13 +124,15 @@ def test_idempotent_reimport(db):
     assert len(n1) == len(n2) == 2  # no duplicates
 
 
-def test_error_token_flagged_not_blank(db):
+def test_error_token_flagged_not_blank_or_na(db):
     csv = (
         "offer_id,DIY Sub-stage,schemecode\n"
-        "A,OFFER_SELECTED,#N/A\n"      # #N/A -> flagged
-        "B,OFFER_SELECTED,\n"          # blank -> not flagged
+        "A,OFFER_SELECTED,#VALUE!\n"    # genuine cell error -> flagged
+        "B,OFFER_SELECTED,#N/A\n"       # client null token -> not flagged
+        "C,OFFER_SELECTED,\n"           # blank -> not flagged
     )
     ingest.ingest_drop(db, csv.encode(), filename="x.csv")
     leads = {l.lead_id: l for l in db.execute(select(Lead)).scalars()}
     assert leads["A"].na_cells == 1
     assert leads["B"].na_cells == 0
+    assert leads["C"].na_cells == 0

@@ -13,39 +13,42 @@ from __future__ import annotations
 
 BUCKETS = ("won", "inflight", "lost", "unclassified")
 
+# Sentinel stage for leads present in the journey feed but with no DIY sub-stage
+# (Sub-Stage = #N/A) — dialed leads that never entered the offer journey.
+NOT_IN_JOURNEY = "Not in DIY Journey"
+
 # order: progression rank along the happy path. Higher == further along.
-# Side branches (callbacks, reuploads, holds) and terminal Lost states carry
-# order=None: they are not points on the linear milestone ladder.
+# Side branches (upgrade track, holds) and terminal Lost states carry order=None:
+# they are not points on the linear milestone ladder.
+#
+# Stage names mirror the real Kotak "DIY Sub-Stage" vocabulary
+# (OFFER_GENERATED, AA_INITIATED, DISBURSEMENT_COMPLETED, ...) after
+# normalization to Title Case.
 STAGE_CATALOG: list[dict] = [
     {"name": "Offer Generated", "bucket": "inflight", "order": 10},
     {"name": "Offer Review", "bucket": "inflight", "order": 15},
     {"name": "Offer Selected", "bucket": "inflight", "order": 20},
-    {"name": "Income Assessment", "bucket": "inflight", "order": 25},
-    {"name": "Application Initiated", "bucket": "inflight", "order": 30},
-    {"name": "Employment Verification", "bucket": "inflight", "order": 35},
-    {"name": "Bank Statement Upload", "bucket": "inflight", "order": 40},
-    {"name": "Address Verification", "bucket": "inflight", "order": 45},
-    {"name": "FI Consent Collection", "bucket": "inflight", "order": 50},
-    {"name": "Reference Check", "bucket": "inflight", "order": 55},
-    {"name": "E-Mandate Setup", "bucket": "inflight", "order": 60},
-    {"name": "E-Sign Pending", "bucket": "inflight", "order": 65},
-    {"name": "Disbursal Initiated", "bucket": "inflight", "order": 70},
+    {"name": "Offer Accepted", "bucket": "inflight", "order": 25},
+    {"name": "AA Initiated", "bucket": "inflight", "order": 30},
+    {"name": "Employment Details", "bucket": "inflight", "order": 35},
+    {"name": "Repayment Setup Completed", "bucket": "inflight", "order": 60},
+    {"name": "Disbursement Initiated", "bucket": "inflight", "order": 70},
     {"name": "Disbursement Completed", "bucket": "won", "order": 100},
-    # Side branches — genuinely in-flight but off the linear ladder.
-    {"name": "Callback Scheduled", "bucket": "inflight", "order": None},
-    {"name": "Document Reupload", "bucket": "inflight", "order": None},
-    {"name": "Offer Upgrade Review", "bucket": "inflight", "order": None},
+    # Terminal Lost states.
+    {"name": "Application Rejected", "bucket": "lost", "order": None},
+    {"name": "Application Dropped", "bucket": "lost", "order": None},
+    # Upgrade / top-up track (existing borrowers offered a further loan).
+    {"name": "Upgrade Offer Generated", "bucket": "inflight", "order": None},
+    {"name": "Upgrade Offer Review", "bucket": "inflight", "order": None},
+    {"name": "Upgrade Offer Selected", "bucket": "inflight", "order": None},
+    {"name": "Upgrade Offer Progress", "bucket": "inflight", "order": None},
+    {"name": "Upgrade Offer Declined", "bucket": "lost", "order": None},
+    {"name": "Upgrade Offer Not Eligible", "bucket": "lost", "order": None},
     # Ambiguous states left Unclassified on purpose — an analyst must decide
     # whether these hide dead leads as pipeline.
     {"name": "Application On Hold", "bucket": "unclassified", "order": None},
     {"name": "FI Consent Collection Failed", "bucket": "unclassified", "order": None},
-    # Terminal Lost states.
-    {"name": "Rejected", "bucket": "lost", "order": None},
-    {"name": "Not Eligible", "bucket": "lost", "order": None},
-    {"name": "Offer Declined", "bucket": "lost", "order": None},
-    {"name": "Dropped", "bucket": "lost", "order": None},
-    {"name": "KYC Failed", "bucket": "lost", "order": None},
-    {"name": "Upgrade Offer Not Eligible", "bucket": "lost", "order": None},
+    {"name": NOT_IN_JOURNEY, "bucket": "unclassified", "order": None},
 ]
 
 STAGE_ORDER: dict[str, int | None] = {s["name"]: s["order"] for s in STAGE_CATALOG}
@@ -55,7 +58,7 @@ DEFAULT_BUCKET: dict[str, str] = {s["name"]: s["bucket"] for s in STAGE_CATALOG}
 MILESTONES: list[dict] = [
     {"key": "offer_generated", "label": "Offer Generated", "short": "Offer Gen.", "order": 10},
     {"key": "offer_selected", "label": "Offer Selected", "short": "Offer Sel.", "order": 20},
-    {"key": "application_initiated", "label": "Application Initiated", "short": "App. Init.", "order": 30},
+    {"key": "aa_initiated", "label": "AA Initiated", "short": "AA Init.", "order": 30},
     {"key": "disbursement_completed", "label": "Disbursement Completed", "short": "Disbursal", "order": 100},
 ]
 MILESTONE_ORDER: dict[str, int] = {m["label"]: m["order"] for m in MILESTONES}

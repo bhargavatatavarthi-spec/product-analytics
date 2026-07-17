@@ -30,18 +30,18 @@ from .models import DailyDrop, Lead, StageEvent
 # Both map onto the same canonical fields below, so either file imports cleanly
 # and rows merge on lead_id (= offer_id).
 FIELD_ALIASES: dict[str, list[str]] = {
-    "lead_id": ["offer_id", "offerid", "lead_id", "leadid", "lead", "id", "customer_id", "applicant_id", "loan_id"],
+    "lead_id": ["internal_id", "offer_id", "offerid", "lead_id", "leadid", "lead", "id", "customer_id", "applicant_id", "loan_id"],
     "drop_date": ["drop_date", "snapshot_date", "as_of_date", "file_date", "report_date", "date"],
     "entry_date": ["created_date", "created date", "entry_date", "created_at", "created", "lead_date", "onboarded_on", "start_date"],
     "stage": ["diy_sub_stage", "diy_substage", "sub_stage", "substage", "stage", "current_stage", "journey_stage", "status", "state"],
-    "disbursed_amount": ["dis_value", "disvalue", "disbursement_value", "disbursed_amount", "disbursal_amount", "disbursed", "loan_disbursed", "amount_disbursed"],
+    "disbursed_amount": ["disbursement_amount", "dis_value", "disvalue", "disbursement_value", "disbursed_amount", "disbursal_amount", "disbursed", "loan_disbursed", "amount_disbursed"],
     "max_loan_amount": ["max_loan_amount", "max_loan_amt", "max_loan", "loan_amount", "sanctioned_amount", "offer_amount"],
     "max_tenure_months": ["max_tenure_months", "max_tenure_month", "max_tenure", "tenure_months", "tenure"],
     "roi": ["roi", "rate_of_interest", "interest_rate", "rate"],
     "emi": ["emi", "emi_amount", "monthly_emi", "installment"],
     "processing_fee": ["processing_fee", "processing_fees", "proc_fee", "pf"],
     "schemecode": ["schemecode", "scheme_code", "scheme", "product_code", "product"],
-    "voice_connected": ["voice_connected", "connected", "ai_connected", "is_connected"],
+    "voice_connected": ["connected_at_least_once", "voice_connected", "connected", "ai_connected", "is_connected"],
     "call_count": ["call_count", "calls", "num_calls", "attempts", "dial_count"],
     "last_disposition": ["last_call_outcome", "last_disposition", "disposition", "call_disposition", "outcome", "call_outcome"],
 }
@@ -62,10 +62,12 @@ def normalize_stage(value: str) -> str:
     if key in _STAGE_BY_NORM:
         return _STAGE_BY_NORM[key]
     return re.sub(r"[_\s]+", " ", value).strip().title()
-# Tokens treated as "no value" during coercion (a blank optional field is fine).
-NA_TOKENS = {"", "#n/a", "n/a", "na", "null", "none", "-", "nan", "#value!", "#ref!"}
-# Stricter set: genuine data-quality errors worth flagging (blank is NOT an error).
-ERROR_TOKENS = {"#n/a", "n/a", "na", "null", "none", "nan", "#value!", "#ref!"}
+# Tokens treated as "no value" during coercion. Clients (incl. Kotak) use
+# "#N/A" pervasively as their null token, so it is a normal absence, not an error.
+NA_TOKENS = {"", "#n/a", "n/a", "na", "null", "none", "-", "nan",
+             "#value!", "#ref!", "#name?", "#div/0!", "#num!", "#null!"}
+# Genuine spreadsheet cell errors worth flagging (blank / #N/A are NOT errors).
+ERROR_TOKENS = {"#value!", "#ref!", "#name?", "#div/0!", "#num!", "#null!"}
 
 
 def _norm(header: str) -> str:
@@ -199,10 +201,16 @@ def extract_row(
     if is_na(lead_id):
         return RowResult(ok=False, error="missing lead_id")
 
-    # Stage is optional (offer feed has none). Only new leads fall back to a
-    # default; for existing leads, no stage means "metadata-only update".
-    raw_stage = raw("stage")
-    stage = None if is_na(raw_stage) else normalize_stage(raw_stage.strip())
+    # Stage handling depends on whether the feed *has* a stage column:
+    #   • no stage column (offer feed)        -> stage=None (new leads get the default)
+    #   • stage column present but value #N/A  -> the sentinel "Not in DIY Journey"
+    #     (a dialed lead that never entered the offer journey)
+    #   • real value                           -> normalized to the catalog name
+    if mapping.get("stage"):
+        raw_stage = raw("stage")
+        stage = catalog.NOT_IN_JOURNEY if is_na(raw_stage) else normalize_stage(raw_stage.strip())
+    else:
+        stage = None
 
     # Voice attribution: explicit column wins; otherwise derive from the call
     # outcome (a connected disposition implies the Voice AI reached the lead).
@@ -353,78 +361,95 @@ def ingest_drop(
     drop.error_rows = error_rows
     drop.status = "partial" if error_rows else "received"
 
-    lead_ids = {v["lead_id"] for v in parsed}
-    existing = {
-        lead.lead_id: lead
-        for lead in db.execute(select(Lead).where(Lead.lead_id.in_(lead_ids))).scalars()
-    } if lead_ids else {}
+    db.flush()  # persist the DailyDrop before the bulk ops below
 
-    new_leads = 0
-    updated_leads = 0
-    new_stages: set[str] = set()
+    # De-duplicate within the file (a snapshot should be unique per lead; last wins).
+    by_id: dict[str, dict] = {}
+    for v in parsed:
+        by_id[v["lead_id"]] = v
+
+    new_stages = sorted({
+        v["stage"] for v in by_id.values()
+        if v["stage"] and v["stage"] not in catalog.STAGE_ORDER
+    })
+
     META_FIELDS = ("max_loan_amount", "max_tenure_months", "roi", "emi",
                    "processing_fee", "schemecode", "disbursed_amount", "last_disposition")
 
-    for v in parsed:
-        lead = existing.get(v["lead_id"])
-        stage = v["stage"]
-        if stage and stage not in catalog.STAGE_ORDER:
-            new_stages.add(stage)
+    # Load existing leads as lightweight rows (no ORM identity map / dirty tracking).
+    cols = (Lead.id, Lead.lead_id, Lead.current_stage, Lead.stage_entered_on,
+            Lead.last_seen_on, Lead.entry_date, Lead.first_seen_on, Lead.na_cells,
+            Lead.voice_connected, Lead.call_count, *[getattr(Lead, f) for f in META_FIELDS])
+    existing: dict[str, dict] = {}
+    if by_id:
+        for row in db.execute(select(*cols)).mappings():
+            if row["lead_id"] in by_id:
+                existing[row["lead_id"]] = row
 
-        if lead is None:
+    new_lead_maps: list[dict] = []
+    update_maps: list[dict] = []
+    new_lead_stage: list[tuple[str, str]] = []   # (lead_id, initial_stage)
+    event_maps: list[dict] = []                  # transition events for existing leads
+
+    for lid, v in by_id.items():
+        stage = v["stage"]
+        cur = existing.get(lid)
+
+        if cur is None:
             initial_stage = stage or fallback_stage
-            lead = Lead(
-                lead_id=v["lead_id"],
-                current_stage=initial_stage,
-                entry_date=v["entry_date"] or the_date,
-                stage_entered_on=the_date,
-                first_seen_on=the_date,
-                last_seen_on=the_date,
-                max_loan_amount=v["max_loan_amount"],
-                max_tenure_months=v["max_tenure_months"],
-                roi=v["roi"],
-                emi=v["emi"],
-                processing_fee=v["processing_fee"],
-                schemecode=v["schemecode"],
-                disbursed_amount=v["disbursed_amount"],
-                voice_connected=v["voice_connected"],
-                call_count=v["call_count"],
-                last_disposition=v["last_disposition"],
-                na_cells=v["na_cells"],
-            )
-            db.add(lead)
-            db.flush()
-            db.add(StageEvent(lead_pk=lead.id, stage=initial_stage, observed_on=the_date))
-            existing[v["lead_id"]] = lead
-            new_leads += 1
+            new_lead_maps.append({
+                "lead_id": lid, "current_stage": initial_stage,
+                "entry_date": v["entry_date"] or the_date,
+                "stage_entered_on": the_date, "first_seen_on": the_date, "last_seen_on": the_date,
+                "voice_connected": v["voice_connected"], "call_count": v["call_count"],
+                "na_cells": v["na_cells"], "had_backward_move": False,
+                **{f: v[f] for f in META_FIELDS},
+            })
+            new_lead_stage.append((lid, initial_stage))
             continue
 
-        updated_leads += 1
-        lead.first_seen_on = min(lead.first_seen_on or the_date, the_date)
+        upd: dict = {"id": cur["id"], "first_seen_on": min(cur["first_seen_on"] or the_date, the_date)}
         if v["entry_date"]:
-            lead.entry_date = min(lead.entry_date or v["entry_date"], v["entry_date"])
-        lead.na_cells += v["na_cells"]
-
-        is_latest = the_date >= (lead.last_seen_on or the_date)
+            upd["entry_date"] = min(cur["entry_date"] or v["entry_date"], v["entry_date"])
+        if v["na_cells"]:
+            upd["na_cells"] = (cur["na_cells"] or 0) + v["na_cells"]
+        is_latest = the_date >= (cur["last_seen_on"] or the_date)
         for fld in META_FIELDS:
-            if v[fld] is not None and (is_latest or getattr(lead, fld) is None):
-                setattr(lead, fld, v[fld])
-        lead.voice_connected = lead.voice_connected or v["voice_connected"]
-        lead.call_count = max(lead.call_count, v["call_count"])
-
-        # Stage transitions only apply when this feed actually carried a stage.
-        if stage and stage != lead.current_stage:
-            db.add(StageEvent(lead_pk=lead.id, stage=stage, observed_on=the_date))
-            prev_order = catalog.STAGE_ORDER.get(lead.current_stage)
+            if v[fld] is not None and (is_latest or cur[fld] is None):
+                upd[fld] = v[fld]
+        if v["voice_connected"] and not cur["voice_connected"]:
+            upd["voice_connected"] = True
+        if v["call_count"] > (cur["call_count"] or 0):
+            upd["call_count"] = v["call_count"]
+        if stage and stage != cur["current_stage"]:
+            event_maps.append({"lead_pk": cur["id"], "stage": stage, "observed_on": the_date})
+            prev_order = catalog.STAGE_ORDER.get(cur["current_stage"])
             new_order = catalog.STAGE_ORDER.get(stage)
             if prev_order is not None and new_order is not None and new_order < prev_order:
-                lead.had_backward_move = True
+                upd["had_backward_move"] = True
             if is_latest:
-                lead.current_stage = stage
-                lead.stage_entered_on = the_date
-
+                upd["current_stage"] = stage
+                upd["stage_entered_on"] = the_date
         if is_latest:
-            lead.last_seen_on = the_date
+            upd["last_seen_on"] = the_date
+        update_maps.append(upd)
+
+    new_leads = len(new_lead_maps)
+    updated_leads = len(update_maps)
+
+    # Bulk persist. bulk_* bypass the unit-of-work for speed on 350k-row drops.
+    if new_lead_maps:
+        db.bulk_insert_mappings(Lead, new_lead_maps)
+        db.flush()
+        idmap = {r["lead_id"]: r["id"] for r in db.execute(select(Lead.id, Lead.lead_id)).mappings()}
+        event_maps.extend(
+            {"lead_pk": idmap[lid], "stage": st, "observed_on": the_date}
+            for lid, st in new_lead_stage
+        )
+    if update_maps:
+        db.bulk_update_mappings(Lead, update_maps)
+    if event_maps:
+        db.bulk_insert_mappings(StageEvent, event_maps)
 
     db.commit()
 

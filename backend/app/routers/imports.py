@@ -13,7 +13,7 @@ from ..models import DailyDrop, Lead, StageEvent
 
 router = APIRouter(prefix="/api/import", tags=["import"])
 
-MAX_BYTES = 25 * 1024 * 1024  # 25 MB per upload
+MAX_BYTES = 80 * 1024 * 1024  # 80 MB per upload (real drops run ~25-40 MB)
 
 
 def _parse_mapping(mapping_json: str | None) -> dict | None:

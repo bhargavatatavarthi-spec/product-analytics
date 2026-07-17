@@ -26,16 +26,16 @@ def test_buckets(db):
     d = today.isoformat()
     ingest.ingest_drop(db, _journey_csv([
         ("A", "Interested", d, "DISBURSEMENT_COMPLETED", "500000"),
-        ("B", "Interested", d, "APPLICATION_INITIATED", ""),
-        ("C", "Not Eligible", d, "REJECTED", ""),
+        ("B", "Interested", d, "OFFER_ACCEPTED", ""),
+        ("C", "Not Eligible", d, "APPLICATION_REJECTED", ""),
         ("D", "Interested", d, "OFFER_SELECTED", ""),
     ]), filename=f"j_{d}.csv", drop_date=today)
 
     ov = analytics.overview(db, "all")
     assert ov["entered"] == 4
     assert ov["buckets"]["won"]["count"] == 1       # Disbursement Completed
-    assert ov["buckets"]["lost"]["count"] == 1       # Rejected
-    assert ov["buckets"]["inflight"]["count"] == 2   # App Init + Offer Selected
+    assert ov["buckets"]["lost"]["count"] == 1       # Application Rejected
+    assert ov["buckets"]["inflight"]["count"] == 2   # Offer Accepted + Offer Selected
 
 
 def test_classification_override_moves_bucket(db):

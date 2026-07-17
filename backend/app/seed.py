@@ -22,7 +22,7 @@ from .models import Lead
 
 # Terminal outcome distribution for a lead's *final* stage (won/lost/inflight mix
 # roughly matching the original 8% / 61% / 31% prototype split).
-_LOST_STAGES = ["Rejected", "Not Eligible", "Offer Declined", "Dropped", "KYC Failed", "Upgrade Offer Not Eligible"]
+_LOST_STAGES = ["Application Rejected", "Application Dropped", "Upgrade Offer Declined", "Upgrade Offer Not Eligible"]
 _INFLIGHT_STAGES = [s["name"] for s in catalog.STAGE_CATALOG if s["bucket"] == "inflight"]
 _DISPOSITIONS = [
     ("Phone Not Answered", 19.0), ("Not Interested", 14.5), ("Number Not Reachable", 8.0),
@@ -36,9 +36,9 @@ _SCHEMES = ["KPAL-PL-STD", "KPAL-PL-PREM", "KPAL-BL-STD", "KPAL-TOPUP", "KPAL-TW
 # Happy-path progression the majority of leads walk before terminating.
 # Ordered to match catalog.STAGE_ORDER so it never produces false backward moves.
 _PROGRESSION = [
-    "Offer Generated", "Offer Selected", "Application Initiated", "Employment Verification",
-    "Bank Statement Upload", "FI Consent Collection", "E-Mandate Setup", "E-Sign Pending",
-    "Disbursal Initiated", "Disbursement Completed",
+    "Offer Generated", "Offer Selected", "Offer Accepted", "AA Initiated",
+    "Employment Details", "Repayment Setup Completed", "Disbursement Initiated",
+    "Disbursement Completed",
 ]
 
 
@@ -86,7 +86,7 @@ def _build_leads(rng: random.Random, num_leads: int, first_entry: date, span_day
             depth = rng.randint(1, len(_PROGRESSION) - 1)
             path = _PROGRESSION[:depth]
             if rng.random() < 0.25:
-                path = path + [rng.choice(["Callback Scheduled", "Document Reupload", "Application On Hold"])]
+                path = path + [rng.choice(["Application On Hold", "Upgrade Offer Progress"])]
         for stage in path:
             timeline.append((day, stage))
             day += rng.choice([0, 1, 1, 2, 2, 3, 5])
@@ -168,11 +168,10 @@ def seed_demo(db: Session, num_leads: int = 4200, drops: int = 30, missing: tupl
             continue
         d = first_drop + timedelta(days=i)
         csv_bytes = _drop_csv(all_leads, d)
-        # Inject a few #N/A cells on one partial day to exercise data-quality flags.
+        # Inject a few genuine cell errors on one partial day to exercise the
+        # data-quality flag (blank / #N/A are normal nulls and not flagged).
         if i == 17:
-            csv_bytes = csv_bytes.replace(b"KPAL100005", b"KPAL100005").replace(
-                _SCHEMES[0].encode(), b"#N/A", 3
-            )
+            csv_bytes = csv_bytes.replace(_SCHEMES[0].encode(), b"#VALUE!", 3)
         ingest.ingest_drop(db, csv_bytes, filename=f"kotak_pal_drop_{d.isoformat()}.csv")
         imported += 1
 

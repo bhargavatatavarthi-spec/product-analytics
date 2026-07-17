@@ -552,7 +552,7 @@ def health(db: Session) -> dict:
     backward = db.execute(select(func.count(Lead.id)).where(Lead.had_backward_move.is_(True))).scalar_one()
 
     flags = [
-        {"count": indian_format(na_rows), "label": "Rows with #N/A", "note": "leads with missing source cells"},
+        {"count": indian_format(na_rows), "label": "Rows with cell errors", "note": "leads with #VALUE!/#REF! source cells"},
         {"count": indian_format(zero_disb), "label": "Zero-value disbursals", "note": "flagged for review"},
         {"count": indian_format(backward), "label": "Backward stage moves", "note": "correction vs. real regression"},
     ]
