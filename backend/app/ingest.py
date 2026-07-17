@@ -22,22 +22,46 @@ from . import catalog
 from .models import DailyDrop, Lead, StageEvent
 
 # Canonical field -> accepted header aliases (matched case/space/punct-insensitively).
+# Kotak PAL delivers two joined daily feeds, both keyed on offer_id:
+#   • offer feed   : offerid, name, mobile, max_loan_amount, max_tenure_months,
+#                    roi, EMI, processing_fee, schemecode
+#   • journey feed : offer_id, last_call_outcome, Created Date (entry), DIY
+#                    Sub-stage (stage), DIS VALUE (disbursed amount)
+# Both map onto the same canonical fields below, so either file imports cleanly
+# and rows merge on lead_id (= offer_id).
 FIELD_ALIASES: dict[str, list[str]] = {
-    "lead_id": ["lead_id", "leadid", "lead", "id", "customer_id", "applicant_id", "loan_id"],
+    "lead_id": ["offer_id", "offerid", "lead_id", "leadid", "lead", "id", "customer_id", "applicant_id", "loan_id"],
     "drop_date": ["drop_date", "snapshot_date", "as_of_date", "file_date", "report_date", "date"],
-    "entry_date": ["entry_date", "created_at", "created_date", "lead_date", "onboarded_on", "start_date"],
-    "stage": ["stage", "current_stage", "sub_stage", "substage", "journey_stage", "status", "state"],
-    "disbursed_amount": ["disbursed_amount", "disbursal_amount", "disbursed", "loan_disbursed", "amount_disbursed"],
-    "max_loan_amount": ["max_loan_amount", "max_loan", "loan_amount", "sanctioned_amount", "offer_amount"],
-    "max_tenure_months": ["max_tenure_months", "max_tenure", "tenure_months", "tenure"],
+    "entry_date": ["created_date", "created date", "entry_date", "created_at", "created", "lead_date", "onboarded_on", "start_date"],
+    "stage": ["diy_sub_stage", "diy_substage", "sub_stage", "substage", "stage", "current_stage", "journey_stage", "status", "state"],
+    "disbursed_amount": ["dis_value", "disvalue", "disbursement_value", "disbursed_amount", "disbursal_amount", "disbursed", "loan_disbursed", "amount_disbursed"],
+    "max_loan_amount": ["max_loan_amount", "max_loan_amt", "max_loan", "loan_amount", "sanctioned_amount", "offer_amount"],
+    "max_tenure_months": ["max_tenure_months", "max_tenure_month", "max_tenure", "tenure_months", "tenure"],
     "roi": ["roi", "rate_of_interest", "interest_rate", "rate"],
+    "emi": ["emi", "emi_amount", "monthly_emi", "installment"],
+    "processing_fee": ["processing_fee", "processing_fees", "proc_fee", "pf"],
     "schemecode": ["schemecode", "scheme_code", "scheme", "product_code", "product"],
     "voice_connected": ["voice_connected", "connected", "ai_connected", "is_connected"],
     "call_count": ["call_count", "calls", "num_calls", "attempts", "dial_count"],
-    "last_disposition": ["last_disposition", "disposition", "call_disposition", "outcome", "call_outcome"],
+    "last_disposition": ["last_call_outcome", "last_disposition", "disposition", "call_disposition", "outcome", "call_outcome"],
 }
 
-REQUIRED_FIELDS = ("lead_id", "stage")
+# Only lead_id is strictly required: the offer feed has no stage column, so a
+# row with no stage still registers/updates the offer (default stage applied to
+# brand-new leads).
+REQUIRED_FIELDS = ("lead_id",)
+DEFAULT_STAGE = "Offer Generated"
+
+# Normalize incoming stage strings (e.g. "DISBURSEMENT_COMPLETED") to catalog names.
+_STAGE_BY_NORM = {re.sub(r"[^a-z0-9]", "", s["name"].lower()): s["name"] for s in catalog.STAGE_CATALOG}
+
+
+def normalize_stage(value: str) -> str:
+    """Map a raw stage string to its catalog name; unknowns become Title Case."""
+    key = re.sub(r"[^a-z0-9]", "", value.lower())
+    if key in _STAGE_BY_NORM:
+        return _STAGE_BY_NORM[key]
+    return re.sub(r"[_\s]+", " ", value).strip().title()
 # Tokens treated as "no value" during coercion (a blank optional field is fine).
 NA_TOKENS = {"", "#n/a", "n/a", "na", "null", "none", "-", "nan", "#value!", "#ref!"}
 # Stricter set: genuine data-quality errors worth flagging (blank is NOT an error).
@@ -109,7 +133,10 @@ def coerce_bool(value: str | None) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "y", "connected", "t")
 
 
-def coerce_date(value: str | None) -> date | None:
+_DMY_RE = re.compile(r"^\s*(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})")
+
+
+def coerce_date(value: str | None, dayfirst: bool = True) -> date | None:
     if is_na(value):
         return None
     v = value.strip()
@@ -119,11 +146,34 @@ def coerce_date(value: str | None) -> date | None:
         return date.fromisoformat(v[:10])
     except ValueError:
         pass
-    # Fall back to day-first parsing for Indian-style DD-MM-YYYY / DD/MM/YYYY.
+    # Slash/dash dates: honour the detected format (Indian DD/MM vs US M/D).
     try:
-        return dateparser.parse(v, dayfirst=True).date()
+        return dateparser.parse(v, dayfirst=dayfirst).date()
     except (ValueError, OverflowError, TypeError):
         return None
+
+
+def detect_dayfirst(values: list[str | None]) -> bool:
+    """Infer whether a date column is day-first (DD/MM) or month-first (M/D).
+
+    A first component > 12 proves day-first; a second component > 12 proves
+    month-first. Defaults to day-first (Indian convention) when ambiguous.
+    """
+    day_first_votes = month_first_votes = 0
+    for v in values:
+        if not v:
+            continue
+        m = _DMY_RE.match(v)
+        if not m:
+            continue
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > 12:
+            day_first_votes += 1
+        elif b > 12:
+            month_first_votes += 1
+    if month_first_votes > day_first_votes:
+        return False
+    return True
 
 
 @dataclass
@@ -133,7 +183,12 @@ class RowResult:
     values: dict = field(default_factory=dict)
 
 
-def extract_row(row: dict[str, str], mapping: dict[str, str | None]) -> RowResult:
+def extract_row(
+    row: dict[str, str],
+    mapping: dict[str, str | None],
+    dayfirst: bool = True,
+    default_stage: str | None = None,
+) -> RowResult:
     """Pull canonical values out of one raw row using the column mapping."""
 
     def raw(field_name: str) -> str | None:
@@ -143,46 +198,71 @@ def extract_row(row: dict[str, str], mapping: dict[str, str | None]) -> RowResul
     lead_id = raw("lead_id")
     if is_na(lead_id):
         return RowResult(ok=False, error="missing lead_id")
-    stage = raw("stage")
-    if is_na(stage):
-        return RowResult(ok=False, error="missing stage")
+
+    # Stage is optional (offer feed has none). Only new leads fall back to a
+    # default; for existing leads, no stage means "metadata-only update".
+    raw_stage = raw("stage")
+    stage = None if is_na(raw_stage) else normalize_stage(raw_stage.strip())
+
+    # Voice attribution: explicit column wins; otherwise derive from the call
+    # outcome (a connected disposition implies the Voice AI reached the lead).
+    disposition = None if is_na(raw("last_disposition")) else raw("last_disposition").strip()
+    voice_col = raw("voice_connected")
+    voice = coerce_bool(voice_col) if not is_na(voice_col) else catalog.is_connected(disposition)
+    call_count = coerce_int(raw("call_count"))
+    if call_count is None:
+        call_count = 1 if disposition else 0
 
     na_cells = sum(1 for f in FIELD_ALIASES if mapping.get(f) and is_error_token(raw(f)))
     values = {
         "lead_id": lead_id.strip(),
-        "stage": stage.strip(),
-        "entry_date": coerce_date(raw("entry_date")),
-        "drop_date": coerce_date(raw("drop_date")),
+        "stage": stage,
+        "entry_date": coerce_date(raw("entry_date"), dayfirst),
+        "drop_date": coerce_date(raw("drop_date"), dayfirst),
         "disbursed_amount": coerce_float(raw("disbursed_amount")),
         "max_loan_amount": coerce_float(raw("max_loan_amount")),
         "max_tenure_months": coerce_float(raw("max_tenure_months")),
         "roi": coerce_float(raw("roi")),
+        "emi": coerce_float(raw("emi")),
+        "processing_fee": coerce_float(raw("processing_fee")),
         "schemecode": None if is_na(raw("schemecode")) else raw("schemecode").strip(),
-        "voice_connected": coerce_bool(raw("voice_connected")),
-        "call_count": coerce_int(raw("call_count")) or 0,
-        "last_disposition": None if is_na(raw("last_disposition")) else raw("last_disposition").strip(),
+        "voice_connected": voice,
+        "call_count": call_count,
+        "last_disposition": disposition,
         "na_cells": na_cells,
     }
     return RowResult(ok=True, values=values)
 
 
+def _resolve_mapping(headers: list[str], mapping: dict[str, str | None] | None) -> dict[str, str | None]:
+    resolved = suggest_mapping(headers)
+    if mapping:
+        resolved.update({k: v for k, v in mapping.items() if v})
+    return resolved
+
+
+def _dayfirst_for(rows: list[dict[str, str]], mapping: dict[str, str | None]) -> bool:
+    """Detect date orientation from the mapped entry_date / drop_date columns."""
+    samples: list[str | None] = []
+    for fld in ("entry_date", "drop_date"):
+        col = mapping.get(fld)
+        if col:
+            samples.extend(r.get(col) for r in rows[:200])
+    return detect_dayfirst(samples)
+
+
 def build_preview(raw: bytes, mapping: dict[str, str | None] | None = None, limit: int = 8) -> dict:
     """Parse just enough to show the user a mapping + sample before committing."""
     headers, rows = parse_csv(raw)
-    suggested = suggest_mapping(headers)
-    if mapping:
-        # Caller-supplied overrides win, but keep suggestions for unset fields.
-        merged = dict(suggested)
-        merged.update({k: v for k, v in mapping.items() if v})
-        mapping = merged
-    else:
-        mapping = suggested
+    mapping = _resolve_mapping(headers, mapping)
+    dayfirst = _dayfirst_for(rows, mapping)
 
     missing_required = [f for f in REQUIRED_FIELDS if not mapping.get(f)]
+    has_stage = bool(mapping.get("stage"))
     sample: list[dict] = []
     ok_count = 0
     for r in rows:
-        res = extract_row(r, mapping)
+        res = extract_row(r, mapping, dayfirst)
         if res.ok:
             ok_count += 1
             if len(sample) < limit:
@@ -193,6 +273,9 @@ def build_preview(raw: bytes, mapping: dict[str, str | None] | None = None, limi
         "fields": list(FIELD_ALIASES.keys()),
         "required": list(REQUIRED_FIELDS),
         "missing_required": missing_required,
+        "dayfirst": dayfirst,
+        "has_stage": has_stage,
+        "default_stage": DEFAULT_STAGE,
         "total_rows": len(rows),
         "valid_rows": ok_count,
         "invalid_rows": len(rows) - ok_count,
@@ -227,26 +310,32 @@ def ingest_drop(
     filename: str = "",
     mapping: dict[str, str | None] | None = None,
     drop_date: date | None = None,
+    default_stage: str | None = None,
 ) -> dict:
     """Parse a CSV and fold it into the reconstructed lead journeys.
 
-    Idempotent per drop_date: re-importing the same date replaces that drop's
-    row-count metadata and re-applies its observations (existing leads are
-    updated, not duplicated).
+    Handles both Kotak feeds (offer + journey), joined on lead_id (= offer_id):
+    the offer feed has no stage, so its rows only enrich metadata on existing
+    leads (or create a lead at ``default_stage``); the journey feed drives stage
+    transitions, entry dates, disbursals and call outcomes.
+
+    Idempotent per drop_date: re-importing the same date updates existing leads
+    rather than duplicating them.
     """
     headers, rows = parse_csv(raw)
-    resolved_mapping = suggest_mapping(headers)
-    if mapping:
-        resolved_mapping.update({k: v for k, v in mapping.items() if v})
+    resolved_mapping = _resolve_mapping(headers, mapping)
 
     missing_required = [f for f in REQUIRED_FIELDS if not resolved_mapping.get(f)]
     if missing_required:
         raise ValueError(f"Cannot import: missing required column(s): {', '.join(missing_required)}")
 
+    dayfirst = _dayfirst_for(rows, resolved_mapping)
+    fallback_stage = default_stage or DEFAULT_STAGE
+
     parsed: list[dict] = []
     error_rows = 0
     for r in rows:
-        res = extract_row(r, resolved_mapping)
+        res = extract_row(r, resolved_mapping, dayfirst)
         if res.ok:
             parsed.append(res.values)
         else:
@@ -254,7 +343,7 @@ def ingest_drop(
 
     the_date = _resolve_drop_date(parsed, filename, drop_date)
 
-    # Upsert the DailyDrop record.
+    # Upsert the DailyDrop record (a date may receive both feeds).
     drop = db.execute(select(DailyDrop).where(DailyDrop.drop_date == the_date)).scalar_one_or_none()
     if drop is None:
         drop = DailyDrop(drop_date=the_date)
@@ -264,7 +353,6 @@ def ingest_drop(
     drop.error_rows = error_rows
     drop.status = "partial" if error_rows else "received"
 
-    # Cache existing leads referenced in this drop for fast upsert.
     lead_ids = {v["lead_id"] for v in parsed}
     existing = {
         lead.lead_id: lead
@@ -274,17 +362,20 @@ def ingest_drop(
     new_leads = 0
     updated_leads = 0
     new_stages: set[str] = set()
+    META_FIELDS = ("max_loan_amount", "max_tenure_months", "roi", "emi",
+                   "processing_fee", "schemecode", "disbursed_amount", "last_disposition")
 
     for v in parsed:
         lead = existing.get(v["lead_id"])
         stage = v["stage"]
-        if stage not in catalog.STAGE_ORDER:
+        if stage and stage not in catalog.STAGE_ORDER:
             new_stages.add(stage)
 
         if lead is None:
+            initial_stage = stage or fallback_stage
             lead = Lead(
                 lead_id=v["lead_id"],
-                current_stage=stage,
+                current_stage=initial_stage,
                 entry_date=v["entry_date"] or the_date,
                 stage_entered_on=the_date,
                 first_seen_on=the_date,
@@ -292,6 +383,8 @@ def ingest_drop(
                 max_loan_amount=v["max_loan_amount"],
                 max_tenure_months=v["max_tenure_months"],
                 roi=v["roi"],
+                emi=v["emi"],
+                processing_fee=v["processing_fee"],
                 schemecode=v["schemecode"],
                 disbursed_amount=v["disbursed_amount"],
                 voice_connected=v["voice_connected"],
@@ -301,29 +394,26 @@ def ingest_drop(
             )
             db.add(lead)
             db.flush()
-            db.add(StageEvent(lead_pk=lead.id, stage=stage, observed_on=the_date))
+            db.add(StageEvent(lead_pk=lead.id, stage=initial_stage, observed_on=the_date))
             existing[v["lead_id"]] = lead
             new_leads += 1
             continue
 
         updated_leads += 1
-        # Timeline bookkeeping.
         lead.first_seen_on = min(lead.first_seen_on or the_date, the_date)
         if v["entry_date"]:
             lead.entry_date = min(lead.entry_date or v["entry_date"], v["entry_date"])
         lead.na_cells += v["na_cells"]
 
-        # Latest non-null metadata wins (only when this drop is the newest we've seen).
         is_latest = the_date >= (lead.last_seen_on or the_date)
-        for fld in ("max_loan_amount", "max_tenure_months", "roi", "schemecode",
-                    "disbursed_amount", "last_disposition"):
+        for fld in META_FIELDS:
             if v[fld] is not None and (is_latest or getattr(lead, fld) is None):
                 setattr(lead, fld, v[fld])
         lead.voice_connected = lead.voice_connected or v["voice_connected"]
         lead.call_count = max(lead.call_count, v["call_count"])
 
-        # Stage transition handling.
-        if stage != lead.current_stage:
+        # Stage transitions only apply when this feed actually carried a stage.
+        if stage and stage != lead.current_stage:
             db.add(StageEvent(lead_pk=lead.id, stage=stage, observed_on=the_date))
             prev_order = catalog.STAGE_ORDER.get(lead.current_stage)
             new_order = catalog.STAGE_ORDER.get(stage)

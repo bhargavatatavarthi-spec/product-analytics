@@ -53,6 +53,7 @@ async def commit(
     file: UploadFile = File(...),
     mapping: str | None = Form(None),
     drop_date: str | None = Form(None),
+    default_stage: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """Ingest the uploaded daily drop into the reconstructed lead journeys."""
@@ -60,7 +61,12 @@ async def commit(
     parsed_date = ingest.coerce_date(drop_date) if drop_date else None
     try:
         summary = ingest.ingest_drop(
-            db, raw, filename=file.filename or "", mapping=_parse_mapping(mapping), drop_date=parsed_date
+            db,
+            raw,
+            filename=file.filename or "",
+            mapping=_parse_mapping(mapping),
+            drop_date=parsed_date,
+            default_stage=default_stage,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

@@ -61,11 +61,14 @@ class Lead(Base):
     first_seen_on: Mapped[date | None] = mapped_column(Date)
     last_seen_on: Mapped[date | None] = mapped_column(Date, index=True)
 
-    # Offer metadata (latest non-null wins).
+    # Offer metadata (latest non-null wins) — from the offer feed.
     max_loan_amount: Mapped[float | None] = mapped_column(Float)
     max_tenure_months: Mapped[float | None] = mapped_column(Float)
     roi: Mapped[float | None] = mapped_column(Float)
+    emi: Mapped[float | None] = mapped_column(Float)
+    processing_fee: Mapped[float | None] = mapped_column(Float)
     schemecode: Mapped[str | None] = mapped_column(String(64))
+    # Disbursed value — from the journey feed (DIS VALUE).
     disbursed_amount: Mapped[float | None] = mapped_column(Float)
 
     # Voice-AI attribution.
