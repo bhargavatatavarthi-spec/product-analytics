@@ -69,6 +69,57 @@ def test_cohort_maturity(db):
     assert any(c["mature"] for c in row["cells"])
 
 
+def test_cohort_from_milestone_dates(db):
+    from app import ingest
+    today = date.today()
+    entry = today - timedelta(days=10)
+    e = entry.isoformat()
+    # Journey feed with an explicit Disbursement Date column. Three leads in one
+    # cohort reach disbursal at day 0, 3 and 6 after entry; one never reaches.
+    csv = (
+        "INTERNAL_ID,DIY Sub-Stage,Created Date,Disbursement Date\n"
+        f"A,DISBURSEMENT_COMPLETED,{e},{entry.isoformat()}\n"
+        f"B,DISBURSEMENT_COMPLETED,{e},{(entry + timedelta(days=3)).isoformat()}\n"
+        f"C,DISBURSEMENT_COMPLETED,{e},{(entry + timedelta(days=6)).isoformat()}\n"
+        f"D,OFFER_GENERATED,{e},#N/A\n"
+    ).encode()
+    r = ingest.ingest_drop(db, csv, filename="j.csv", drop_date=today)
+    assert "disbursement_on" in r["milestone_dates_detected"]
+
+    co = analytics.cohort(db, "Disbursement Completed")
+    assert co["milestone_dated"] is True
+    row = next(r for r in co["rows"] if r["size"] == 4)  # the 4-lead cohort
+    cells = row["cells"]
+    # Curve climbs: 25% by D0, 50% by D3, 75% by D6 (D never reaches).
+    assert cells[0]["value"] == 25.0
+    assert cells[3]["value"] == 50.0
+    assert cells[6]["value"] == 75.0
+    assert cells[9]["value"] == 75.0  # plateaus
+
+
+def test_cohort_reports_missing_dates(db):
+    from app import ingest
+    today = date.today()
+    ingest.ingest_drop(db, (
+        "INTERNAL_ID,DIY Sub-Stage,Created Date\n"
+        f"A,OFFER_SELECTED,{(today - timedelta(days=5)).isoformat()}\n"
+    ).encode(), filename="j.csv", drop_date=today)
+    # No offer-selected date column -> that cohort flags as undated.
+    assert analytics.cohort(db, "Offer Selected")["milestone_dated"] is False
+
+
+def test_dia_date_alias_maps_to_aa_initiated(db):
+    from app import ingest
+    from sqlalchemy import select
+    from app.models import Lead
+    ingest.ingest_drop(db, (
+        "INTERNAL_ID,DIY Sub-Stage,Created Date,DIA Date\n"
+        "A,AA_INITIATED,05-07-2026,08-07-2026\n"
+    ).encode(), filename="j.csv", drop_date=date(2026, 7, 18))
+    lead = db.execute(select(Lead).where(Lead.lead_id == "A")).scalar_one()
+    assert lead.aa_initiated_on == date(2026, 7, 8)
+
+
 def test_health_flags_and_completeness(db):
     today = date.today()
     ingest.ingest_drop(db, _journey_csv([

@@ -233,14 +233,14 @@ def overview(db: Session, range_key: str) -> dict:
 # ─────────────────────────── cohort triangle ───────────────────────────
 def cohort(db: Session, milestone_label: str) -> dict:
     as_of = get_as_of(db)
-    milestone_order = catalog.MILESTONE_ORDER.get(
-        milestone_label, catalog.MILESTONE_ORDER[catalog.DEFAULT_MILESTONE]
+    date_field = catalog.MILESTONE_DATE_FIELD.get(
+        milestone_label, catalog.MILESTONE_DATE_FIELD[catalog.DEFAULT_MILESTONE]
     )
-    milestone_stages = [s for s, o in catalog.STAGE_ORDER.items() if o is not None and o >= milestone_order]
+    date_col = getattr(Lead, date_field)
     cohort_dates = [as_of - timedelta(days=13 - i) for i in range(14)]
     earliest = cohort_dates[0]
 
-    # Cohort sizes: one GROUP BY over entry_date.
+    # Cohort sizes: one GROUP BY over entry_date (the journey's Created Date).
     sizes = dict(
         db.execute(
             select(Lead.entry_date, func.count())
@@ -249,25 +249,18 @@ def cohort(db: Session, milestone_label: str) -> dict:
         ).all()
     )
 
-    # Per-lead days-to-reach the milestone: MIN over qualifying stage events.
+    # True reach: reach_day = milestone_date − entry_date, from the feed's own
+    # milestone-date column. Only leads that have that date count as reached.
     reach_by_cohort: dict[date, list[int]] = defaultdict(list)
-    if milestone_stages:
-        reach_day = cast(
-            func.julianday(StageEvent.observed_on) - func.julianday(Lead.entry_date), Integer
+    dated_leads = 0
+    for entry, mdate in db.execute(
+        select(Lead.entry_date, date_col).where(
+            Lead.entry_date >= earliest, Lead.entry_date <= as_of, date_col.isnot(None)
         )
-        stmt = (
-            select(Lead.entry_date, func.min(reach_day))
-            .join(StageEvent, StageEvent.lead_pk == Lead.id)
-            .where(
-                Lead.entry_date >= earliest,
-                Lead.entry_date <= as_of,
-                StageEvent.stage.in_(milestone_stages),
-            )
-            .group_by(StageEvent.lead_pk)
-        )
-        for entry, rd in db.execute(stmt).all():
-            if entry is not None:
-                reach_by_cohort[entry].append(max(0, rd or 0))
+    ).all():
+        if entry is not None and mdate is not None:
+            reach_by_cohort[entry].append(max(0, (mdate - entry).days))
+            dated_leads += 1
 
     cols = [{"label": f"D{d}", "full": f"Day {d}"} for d in range(14)]
     rows = []
@@ -317,6 +310,8 @@ def cohort(db: Session, milestone_label: str) -> dict:
         ),
         "cols": cols,
         "rows": rows,
+        "milestone_dated": dated_leads > 0,
+        "date_field": date_field,
         "summary": {
             "avg_days": avg_days,
             "plateau_day": plateau_day,

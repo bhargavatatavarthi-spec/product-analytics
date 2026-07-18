@@ -74,6 +74,13 @@ class Lead(Base):
     # Disbursed value — from the journey feed (DIS VALUE).
     disbursed_amount: Mapped[float | None] = mapped_column(Float)
 
+    # Explicit milestone dates (when the feed provides them) — power true cohort
+    # curves: reach_day = milestone_date − entry_date. Latest non-null wins.
+    offer_generated_on: Mapped[date | None] = mapped_column(Date)
+    offer_selected_on: Mapped[date | None] = mapped_column(Date)
+    aa_initiated_on: Mapped[date | None] = mapped_column(Date)
+    disbursement_on: Mapped[date | None] = mapped_column(Date)
+
     # Voice-AI attribution.
     voice_connected: Mapped[bool] = mapped_column(Boolean, default=False)
     call_count: Mapped[int] = mapped_column(Integer, default=0)

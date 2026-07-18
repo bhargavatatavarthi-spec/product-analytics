@@ -55,12 +55,15 @@ STAGE_ORDER: dict[str, int | None] = {s["name"]: s["order"] for s in STAGE_CATAL
 DEFAULT_BUCKET: dict[str, str] = {s["name"]: s["bucket"] for s in STAGE_CATALOG}
 
 # Cohort-Triangle milestones, ordered from earliest to latest along the ladder.
+# `date_field` is the Lead column holding that milestone's real date (from the
+# feed), used to compute cohort reach as milestone_date − entry_date.
 MILESTONES: list[dict] = [
-    {"key": "offer_generated", "label": "Offer Generated", "short": "Offer Gen.", "order": 10},
-    {"key": "offer_selected", "label": "Offer Selected", "short": "Offer Sel.", "order": 20},
-    {"key": "aa_initiated", "label": "AA Initiated", "short": "AA Init.", "order": 30},
-    {"key": "disbursement_completed", "label": "Disbursement Completed", "short": "Disbursal", "order": 100},
+    {"key": "offer_generated", "label": "Offer Generated", "short": "Offer Gen.", "order": 10, "date_field": "offer_generated_on"},
+    {"key": "offer_selected", "label": "Offer Selected", "short": "Offer Sel.", "order": 20, "date_field": "offer_selected_on"},
+    {"key": "aa_initiated", "label": "AA Initiated", "short": "AA Init.", "order": 30, "date_field": "aa_initiated_on"},
+    {"key": "disbursement_completed", "label": "Disbursement Completed", "short": "Disbursal", "order": 100, "date_field": "disbursement_on"},
 ]
+MILESTONE_DATE_FIELD = {m["label"]: m["date_field"] for m in MILESTONES}
 MILESTONE_ORDER: dict[str, int] = {m["label"]: m["order"] for m in MILESTONES}
 DEFAULT_MILESTONE = "Disbursement Completed"
 

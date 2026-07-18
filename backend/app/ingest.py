@@ -45,7 +45,15 @@ FIELD_ALIASES: dict[str, list[str]] = {
     "voice_connected": ["connected_at_least_once", "voice_connected", "connected", "ai_connected", "is_connected"],
     "call_count": ["call_count", "calls", "num_calls", "attempts", "dial_count"],
     "last_disposition": ["last_call_outcome", "last_disposition", "disposition", "call_disposition", "outcome", "call_outcome"],
+    # Explicit milestone dates for cohort analysis (optional; auto-detected).
+    "offer_generated_on": ["offer_generated_date", "offer_generated_on", "offer_generated", "offer_gen_date", "og_date"],
+    "offer_selected_on": ["offer_selected_date", "offer_selected_on", "offer_selected", "offer_selection_date", "os_date"],
+    "aa_initiated_on": ["aa_initiated_date", "aa_initiated_on", "aa_initiation_date", "aa_date", "dia_date", "dia_initiated_date", "dia_initiation_date", "account_aggregator_date"],
+    "disbursement_on": ["disbursement_date", "disbursed_date", "disbursal_date", "disbursement_completed_date", "disbursal_completed_date", "disbursement_on", "disbursed_on"],
 }
+
+# Canonical milestone-date fields (subset of FIELD_ALIASES) for reporting/mapping.
+MILESTONE_DATE_FIELDS = ("offer_generated_on", "offer_selected_on", "aa_initiated_on", "disbursement_on")
 
 # Only lead_id is strictly required: the offer feed has no stage column, so a
 # row with no stage still registers/updates the offer (default stage applied to
@@ -285,6 +293,10 @@ def extract_row(
         "voice_connected": voice,
         "call_count": call_count,
         "last_disposition": disposition,
+        "offer_generated_on": coerce_date(raw("offer_generated_on"), dayfirst),
+        "offer_selected_on": coerce_date(raw("offer_selected_on"), dayfirst),
+        "aa_initiated_on": coerce_date(raw("aa_initiated_on"), dayfirst),
+        "disbursement_on": coerce_date(raw("disbursement_on"), dayfirst),
         "na_cells": na_cells,
     }
     # Derive EMI from terms when the feed doesn't supply it (reducing balance).
@@ -398,7 +410,9 @@ def ingest_drop(
 
     fallback_stage = default_stage or DEFAULT_STAGE
     META_FIELDS = ("max_loan_amount", "max_tenure_months", "roi", "emi",
-                   "processing_fee", "schemecode", "disbursed_amount", "last_disposition")
+                   "processing_fee", "schemecode", "disbursed_amount", "last_disposition",
+                   "offer_generated_on", "offer_selected_on", "aa_initiated_on", "disbursement_on")
+    detected_dates = [f for f in MILESTONE_DATE_FIELDS if resolved_mapping.get(f)]
     cols = (Lead.id, Lead.lead_id, Lead.current_stage, Lead.stage_entered_on,
             Lead.last_seen_on, Lead.entry_date, Lead.first_seen_on, Lead.na_cells,
             Lead.voice_connected, Lead.call_count, Lead.had_backward_move,
@@ -593,5 +607,6 @@ def ingest_drop(
         "new_leads": totals["new"],
         "updated_leads": totals["updated"],
         "new_unmapped_stages": sorted(new_stages),
+        "milestone_dates_detected": detected_dates,
         "mapping": resolved_mapping,
     }
