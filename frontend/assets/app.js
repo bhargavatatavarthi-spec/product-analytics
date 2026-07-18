@@ -580,27 +580,45 @@ async function setMilestoneDefault(label) {
 }
 
 // ═══════════════════════════ DATA IMPORT ═══════════════════════════
-const importState = { file: null, preview: null, dropDate: "", busy: false };
+const importState = { busy: false, progress: null, dropDate: "" };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function renderImport() {
   const drops = await API.get("/api/import/drops");
+  const busy = importState.busy;
 
-  const dz = h("div", { class: "dropzone", id: "dropzone" },
+  const dz = h("div", { class: "dropzone", id: "dropzone", style: busy ? { pointerEvents: "none", opacity: "0.55" } : {} },
     svg(`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>`, { stroke: "var(--ss-lucid)", w: 30, sw: 1.8 }),
-    h("div", { style: { fontSize: "15px", fontWeight: "700", marginTop: "10px" } }, importState.file ? importState.file.name : "Drop a daily CSV here, or click to browse"),
-    h("div", { class: "muted", style: { marginTop: "4px" } }, "Offer feed or journey feed — columns are auto-detected. Max 25 MB."));
-  const input = h("input", { type: "file", accept: ".csv,text/csv", style: { display: "none" }, id: "file-input", onChange: (e) => onFilePicked(e.target.files[0]) });
-  dz.addEventListener("click", () => input.click());
-  dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("drag"); });
-  dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
-  dz.addEventListener("drop", (e) => { e.preventDefault(); dz.classList.remove("drag"); if (e.dataTransfer.files[0]) onFilePicked(e.dataTransfer.files[0]); });
+    h("div", { style: { fontSize: "15px", fontWeight: "700", marginTop: "10px" } }, "Drop your daily CSV file(s) here, or click to browse"),
+    h("div", { class: "muted", style: { marginTop: "4px" } }, "Journey and/or offer feed — columns auto-detected. Select both together and they import in sequence."));
+  const input = h("input", { type: "file", accept: ".csv,text/csv", multiple: true, style: { display: "none" }, id: "file-input", onChange: (e) => onFilesPicked(e.target.files) });
+  if (!busy) {
+    dz.addEventListener("click", () => input.click());
+    dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("drag"); });
+    dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
+    dz.addEventListener("drop", (e) => { e.preventDefault(); dz.classList.remove("drag"); onFilesPicked(e.dataTransfer.files); });
+  }
+
+  const pr = importState.progress;
+  const progressBlock = pr ? h("div", { style: { marginTop: "20px" } },
+    h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "7px" } },
+      h("span", { id: "import-label", style: { fontWeight: "700", fontSize: "13.5px" } },
+        "Processing…" + (pr.count > 1 ? ` (file ${pr.index} of ${pr.count})` : "")),
+      h("span", { id: "import-pct", style: { fontWeight: "800", fontSize: "14px", color: "var(--ss-lucid)" } }, pr.percent + "%")),
+    h("div", { style: { height: "10px", borderRadius: "999px", background: "#e7e3f2", overflow: "hidden" } },
+      h("div", { id: "import-bar", style: { width: pr.percent + "%", height: "100%", background: "var(--ss-lucid)", transition: "width 0.3s ease" } })),
+    h("div", { class: "muted", style: { marginTop: "7px" } }, "Keep this tab open — the dashboards update automatically when it finishes.")) : null;
+
+  const dateRow = h("div", { style: { display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" } },
+    h("span", { class: "muted" }, "Drop date (optional):"),
+    h("input", { type: "date", value: importState.dropDate, class: "map-select", style: { width: "170px" }, disabled: busy,
+      onChange: (e) => { importState.dropDate = e.target.value; } }),
+    h("span", { class: "muted", style: { fontSize: "12px" } }, "defaults to today / the date in the filename"));
 
   const uploadCard = h("div", { class: "card", style: { marginBottom: "16px" } },
     h("div", { class: "ss-eyebrow", style: { marginBottom: "12px" } }, "Manual import"),
-    dz, input,
-    importState.preview ? renderPreviewBlock() : null);
+    dateRow, dz, input, progressBlock);
 
-  // Drop history
   const historyRows = drops.drops.length
     ? drops.drops.map((dr) => h("tr", null,
         h("td", null, dr.drop_date),
@@ -613,7 +631,7 @@ async function renderImport() {
   const historyCard = h("div", { class: "card" },
     h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" } },
       h("div", null, h("div", { class: "ss-eyebrow" }, "Drop history"), h("h3", { style: { margin: "2px 0 0", fontSize: "17px" } }, drops.total_leads.toLocaleString("en-IN") + " leads across " + drops.drops.length + " drops")),
-      drops.drops.length ? h("button", { class: "btn btn-danger", onClick: resetData }, "Reset all data") : null),
+      drops.drops.length && !busy ? h("button", { class: "btn btn-danger", onClick: resetData }, "Reset all data") : null),
     h("table", { class: "drops-table" },
       h("thead", null, h("tr", null, ["Drop date", "File", "Rows", "Status", "Errors"].map((t) => h("th", null, t)))),
       h("tbody", null, historyRows)));
@@ -621,98 +639,50 @@ async function renderImport() {
   setContent(h("div", { style: { maxWidth: "1000px" } },
     h("div", { class: "callout" },
       svg(`<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>`, { stroke: "var(--ss-lucid)", w: 20, sw: 2 }),
-      h("div", { class: "callout-text" }, "Each file is one dated drop, joined to existing leads by offer_id. Re-importing a date updates it — it never duplicates. The drop date is read from the file/filename; override it below if needed.")),
+      h("div", { class: "callout-text" }, "Each file is one dated drop, joined to existing leads by offer_id. Re-importing a date updates it — it never duplicates.")),
     uploadCard, historyCard));
 }
 
-function renderPreviewBlock() {
-  const p = importState.preview;
-  const fieldRow = (f) => {
-    const required = p.required.includes(f);
-    const missing = required && !p.mapping[f];
-    return h("div", { class: "map-field" + (required ? " required" : "") + (missing ? " missing" : "") },
-      h("div", { style: { fontSize: "12px", fontWeight: "700" } }, f + (required ? " *" : "")),
-      h("select", { class: "map-select", onChange: (e) => remap(f, e.target.value) },
-        [h("option", { value: "" }, "— not mapped —"), ...p.headers.map((hd) => h("option", { value: hd, selected: p.mapping[f] === hd }, hd))]));
-  };
-
-  const cols = ["lead_id", "stage", "entry_date", "disbursed_amount", "max_loan_amount", "roi", "schemecode", "last_disposition"];
-  const sampleTable = h("div", { style: { overflowX: "auto", marginTop: "16px" } },
-    h("table", { class: "preview-table" },
-      h("thead", null, h("tr", null, cols.map((c) => h("th", null, c)))),
-      h("tbody", null, p.sample.slice(0, 6).map((row) => h("tr", null, cols.map((c) => h("td", null, fmtCell(row[c]))))))));
-
-  const stageNote = !p.has_stage
-    ? h("div", { class: "muted", style: { marginTop: "10px" } }, "No stage column detected — this looks like an offer feed. New offers will enter at “" + p.default_stage + "”; a later journey drop will set their real stage.")
-    : null;
-
-  return h("div", { style: { marginTop: "20px" } },
-    h("div", { style: { display: "flex", gap: "24px", flexWrap: "wrap", marginBottom: "14px" } },
-      stat("Rows detected", p.total_rows.toLocaleString("en-IN")),
-      stat("Valid", p.valid_rows.toLocaleString("en-IN")),
-      stat("Will skip", p.invalid_rows.toLocaleString("en-IN")),
-      stat("Date format", p.dayfirst ? "DD/MM/YYYY" : "MM/DD/YYYY")),
-    p.missing_required.length ? h("div", { style: { color: "var(--ss-danger)", fontWeight: "700", marginBottom: "12px", fontSize: "13px" } }, "Missing required column: " + p.missing_required.join(", ")) : null,
-    h("div", { class: "ss-eyebrow", style: { margin: "6px 0 10px" } }, "Column mapping"),
-    h("div", { class: "mapping-grid" }, p.fields.filter((f) => p.mapping[f] || p.required.includes(f) || ["stage", "entry_date", "disbursed_amount", "last_disposition"].includes(f)).map(fieldRow)),
-    stageNote,
-    h("div", { class: "ss-eyebrow", style: { margin: "18px 0 8px" } }, "Preview (first rows, as parsed)"),
-    sampleTable,
-    h("div", { style: { display: "flex", alignItems: "center", gap: "14px", marginTop: "20px" } },
-      h("div", null, h("div", { class: "muted", style: { marginBottom: "4px" } }, "Drop date (override)"),
-        h("input", { type: "date", value: importState.dropDate, class: "map-select", style: { width: "170px" }, onChange: (e) => { importState.dropDate = e.target.value; } })),
-      h("div", { style: { flex: "1" } }),
-      h("button", { class: "btn btn-ghost", onClick: () => { importState.file = null; importState.preview = null; render(); } }, "Cancel"),
-      h("button", { class: "btn btn-primary", disabled: p.missing_required.length > 0 || importState.busy, onClick: commitImport }, importState.busy ? h("span", { class: "spinner" }) : "Import " + p.valid_rows.toLocaleString("en-IN") + " rows")));
+async function onFilesPicked(fileList) {
+  const files = Array.from(fileList || []).filter((f) => /\.csv$/i.test(f.name) || (f.type || "").includes("csv"));
+  if (!files.length || importState.busy) return;
+  importState.busy = true;
+  let ok = 0;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      importState.progress = { index: i + 1, count: files.length, percent: 0, filename: files[i].name };
+      render();
+      await importOne(files[i]);
+      ok++;
+    }
+    state.meta = await API.get("/api/meta");
+    toast(`Imported ${ok} file${ok > 1 ? "s" : ""} — dashboards updated`, "success");
+  } catch (e) {
+    toast("Import failed: " + e.message, "error");
+  } finally {
+    importState.busy = false;
+    importState.progress = null;
+    render();
+  }
 }
 
-function fmtCell(v) {
-  if (v == null) return "—";
-  if (typeof v === "boolean") return v ? "yes" : "no";
-  return String(v);
-}
-function stat(label, value) {
-  return h("div", null, h("div", { class: "muted" }, label), h("div", { style: { fontSize: "20px", fontWeight: "800", letterSpacing: "-0.02em" } }, value));
-}
-
-async function onFilePicked(file) {
-  if (!file) return;
-  importState.file = file;
-  importState.preview = null;
-  importState.dropDate = "";
-  render();
+async function importOne(file) {
   const fd = new FormData();
   fd.append("file", file);
-  try {
-    importState.preview = await API.upload("/api/import/preview", fd);
-    render();
-  } catch (e) { toast("Preview failed: " + e.message, "error"); importState.file = null; render(); }
-}
-
-async function remap(field, header) {
-  if (!importState.file) return;
-  const mapping = Object.assign({}, importState.preview.mapping);
-  mapping[field] = header || null;
-  const fd = new FormData();
-  fd.append("file", importState.file);
-  fd.append("mapping", JSON.stringify(mapping));
-  try { importState.preview = await API.upload("/api/import/preview", fd); render(); } catch (e) { toast(e.message, "error"); }
-}
-
-async function commitImport() {
-  if (!importState.file || importState.busy) return;
-  importState.busy = true; render();
-  const fd = new FormData();
-  fd.append("file", importState.file);
-  fd.append("mapping", JSON.stringify(importState.preview.mapping));
   if (importState.dropDate) fd.append("drop_date", importState.dropDate);
-  try {
-    const r = await API.upload("/api/import/commit", fd);
-    toast(`Imported ${r.imported_rows} rows for ${r.drop_date} — ${r.new_leads} new, ${r.updated_leads} updated`, "success");
-    importState.file = null; importState.preview = null; importState.busy = false;
-    state.meta = await API.get("/api/meta");
-    render();
-  } catch (e) { importState.busy = false; toast("Import failed: " + e.message, "error"); render(); }
+  const { job_id } = await API.upload("/api/import/start", fd);
+  // Poll for progress, updating the bar in place (no full re-render).
+  while (true) {
+    await sleep(700);
+    const s = await API.get("/api/import/status/" + job_id);
+    if (importState.progress) importState.progress.percent = s.percent;
+    const bar = document.getElementById("import-bar");
+    const pct = document.getElementById("import-pct");
+    if (bar) bar.style.width = s.percent + "%";
+    if (pct) pct.textContent = s.percent + "%";
+    if (s.status === "done") return s.result;
+    if (s.status === "error") throw new Error(s.error || "processing error");
+  }
 }
 
 async function resetData() {
