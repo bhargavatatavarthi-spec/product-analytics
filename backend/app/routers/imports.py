@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .. import ingest
+from .. import ingest, jobs
 from ..db import get_db
 from ..models import DailyDrop, Lead, StageEvent
 
@@ -71,6 +71,31 @@ async def commit(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return summary
+
+
+@router.post("/start")
+async def start(
+    file: UploadFile = File(...),
+    mapping: str | None = Form(None),
+    drop_date: str | None = Form(None),
+    default_stage: str | None = Form(None),
+):
+    """Begin a background import and return a job id to poll. Non-blocking."""
+    raw = await _read(file)
+    parsed_date = ingest.coerce_date(drop_date) if drop_date else None
+    job_id = jobs.start_import(
+        raw, file.filename or "", _parse_mapping(mapping), parsed_date, default_stage
+    )
+    return {"job_id": job_id}
+
+
+@router.get("/status/{job_id}")
+def status(job_id: str):
+    """Progress of a background import: status + 0–100 percent."""
+    s = jobs.get_status(job_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="Unknown job")
+    return s
 
 
 @router.get("/drops")

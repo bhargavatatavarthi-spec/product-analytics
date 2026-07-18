@@ -145,11 +145,16 @@ Interactive docs at `/docs`.
 
 ## Manual import flow
 
-1. **Data Import** screen → drop a CSV (offer or journey feed).
-2. The app auto-detects columns, date format, and shows a parsed preview with
-   valid/skip counts. Adjust any mapping; override the drop date if needed.
-3. **Import** → the drop is reconstructed into the analytics; a history row and
-   toast confirm the result. Every other screen updates on the next visit.
+1. **Data Import** screen → drop your daily CSV file(s) (journey and/or offer
+   feed — select both together). Columns and date format are auto-detected.
+2. Each file uploads to a **background job** and shows a live **0–100 %
+   progress bar** ("Processing… file 1 of 2"); the UI never freezes and there's
+   no HTTP-timeout risk. Multiple files import in sequence.
+3. When it finishes, a toast confirms and every dashboard reflects the new data.
+
+The import is non-blocking (`POST /api/import/start` → poll
+`GET /api/import/status/{job_id}`); writes are serialised so queued files never
+conflict.
 
 Example files: [`sample_data/`](./sample_data).
 

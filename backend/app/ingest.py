@@ -377,6 +377,7 @@ def ingest_drop(
     mapping: dict[str, str | None] | None = None,
     drop_date: date | None = None,
     default_stage: str | None = None,
+    progress_cb=None,
 ) -> dict:
     """Parse a CSV and fold it into the reconstructed lead journeys.
 
@@ -552,6 +553,9 @@ def ingest_drop(
             state["since_commit"] = 0
         else:
             db.flush()
+
+        if progress_cb:
+            progress_cb(totals["total"])
 
     process_chunk(first)
     for chunk in _chunks(reader, CHUNK):
