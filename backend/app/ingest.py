@@ -431,11 +431,15 @@ def ingest_drop(
         if state["drop"] is None:
             the_date = _resolve_drop_date(parsed, filename, drop_date)
             state["date"] = the_date
-            drop = db.execute(select(DailyDrop).where(DailyDrop.drop_date == the_date)).scalar_one_or_none()
+            # One ledger row per (date, file): re-importing the same file updates
+            # it; a different file for the same date is a separate row, so both
+            # the journey and offer feeds stay visible in the history.
+            drop = db.execute(
+                select(DailyDrop).where(DailyDrop.drop_date == the_date, DailyDrop.filename == filename)
+            ).scalar_one_or_none()
             if drop is None:
-                drop = DailyDrop(drop_date=the_date)
+                drop = DailyDrop(drop_date=the_date, filename=filename)
                 db.add(drop)
-            drop.filename = filename or drop.filename
             db.flush()
             state["drop"] = drop
         the_date = state["date"]
@@ -565,11 +569,12 @@ def ingest_drop(
     if state["drop"] is None:
         the_date = _resolve_drop_date([], filename, drop_date)
         state["date"] = the_date
-        drop = db.execute(select(DailyDrop).where(DailyDrop.drop_date == the_date)).scalar_one_or_none()
+        drop = db.execute(
+            select(DailyDrop).where(DailyDrop.drop_date == the_date, DailyDrop.filename == filename)
+        ).scalar_one_or_none()
         if drop is None:
-            drop = DailyDrop(drop_date=the_date)
+            drop = DailyDrop(drop_date=the_date, filename=filename)
             db.add(drop)
-        drop.filename = filename or drop.filename
         state["drop"] = drop
 
     drop = state["drop"]
