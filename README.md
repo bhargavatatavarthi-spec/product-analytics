@@ -59,8 +59,13 @@ Key ideas:
 populated dashboard. Everything else enriches specific panels and **degrades
 gracefully** (honest empty states, never fabricated numbers):
 
-- **stage** → Overview buckets, Stage Explorer, Cohort milestones
-- **entry_date / drop_date** → cohorts, range filters, time-in-stage, Data Health
+- **stage** → Overview buckets, Stage Explorer
+- **entry_date (Created Date)** → cohort rows, range filters, time-in-stage
+- **milestone dates** (optional: offer-generated / offer-selected / DIA-AA-initiated
+  / disbursement date) → the **Cohort Triangle**. Reach = milestone_date −
+  Created Date, so real cohort curves come from a single daily drop. Auto-detected
+  by column name (e.g. `DIA Date` → AA Initiated); a milestone with no date column
+  shows a "add this column" note instead of a misleading grid.
 - **DIS VALUE** → Attribution ₹ amounts
 - **max_loan_amount / tenure / roi / schemecode** → Attribution metadata cuts
 - **last_call_outcome** → call-outcome breakdown, connect rate, Voice-AI split
