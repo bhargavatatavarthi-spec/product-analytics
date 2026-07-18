@@ -31,7 +31,10 @@ def _utcnow() -> datetime:
 
 
 class DailyDrop(Base):
-    """One imported client file for a given calendar date."""
+    """One imported client file. A single calendar date may receive several
+    files (e.g. the journey feed and the offer feed), so each file is its own
+    ledger row — keyed by (drop_date, filename) — rather than one row per date.
+    Data-Health completeness still counts distinct dates present."""
 
     __tablename__ = "daily_drops"
 
@@ -42,9 +45,9 @@ class DailyDrop(Base):
     # "received" (a full drop) or "partial" (some rows failed to parse).
     status: Mapped[str] = mapped_column(String(16), default="received")
     error_rows: Mapped[int] = mapped_column(Integer, default=0)
-    imported_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
-    __table_args__ = (UniqueConstraint("drop_date", name="uq_drop_date"),)
+    __table_args__ = (UniqueConstraint("drop_date", "filename", name="uq_drop_date_file"),)
 
 
 class Lead(Base):
