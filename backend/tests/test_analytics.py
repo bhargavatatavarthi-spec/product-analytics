@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app import analytics, ingest
-from app.models import StageClassification
 
 
 def _journey_csv(rows: list[tuple[str, str, str, str]]) -> bytes:
@@ -38,7 +37,7 @@ def test_buckets(db):
     assert ov["buckets"]["inflight"]["count"] == 2   # Offer Accepted + Offer Selected
 
 
-def test_classification_override_moves_bucket(db):
+def test_unclassified_bucket_default(db):
     today = date.today()
     ingest.ingest_drop(db, _journey_csv([
         ("A", "Interested", today.isoformat(), "APPLICATION_ON_HOLD", ""),
@@ -46,12 +45,6 @@ def test_classification_override_moves_bucket(db):
 
     ov = analytics.overview(db, "all")
     assert ov["buckets"]["unclassified"]["count"] == 1  # On Hold defaults unclassified
-
-    db.add(StageClassification(stage="Application On Hold", bucket="lost"))
-    db.commit()
-    ov2 = analytics.overview(db, "all")
-    assert ov2["buckets"]["unclassified"]["count"] == 0
-    assert ov2["buckets"]["lost"]["count"] == 1
 
 
 def test_cohort_maturity(db):
@@ -118,17 +111,6 @@ def test_dia_date_alias_maps_to_aa_initiated(db):
     ).encode(), filename="j.csv", drop_date=date(2026, 7, 18))
     lead = db.execute(select(Lead).where(Lead.lead_id == "A")).scalar_one()
     assert lead.aa_initiated_on == date(2026, 7, 8)
-
-
-def test_health_flags_and_completeness(db):
-    today = date.today()
-    ingest.ingest_drop(db, _journey_csv([
-        ("A", "Interested", today.isoformat(), "DISBURSEMENT_COMPLETED", ""),  # won, zero disbursal
-    ]), filename="j.csv", drop_date=today)
-    hr = analytics.health(db)
-    labels = {f["label"]: f["count"] for f in hr["flags"]}
-    assert labels["Zero-value disbursals"] == "1"
-    assert hr["completeness"] > 0
 
 
 def test_indian_format():

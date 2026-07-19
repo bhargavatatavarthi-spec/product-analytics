@@ -5,9 +5,6 @@ imported data: the canonical ordering of sub-stages, their default bucket
 classification (Won / In-flight / Lost / Unclassified), the milestone
 definitions used by the Cohort Triangle, and the connected/not-connected map
 for call dispositions.
-
-Stage classifications are only *defaults* — the Stage Explorer lets an analyst
-override any stage, and those overrides are persisted in the DB.
 """
 from __future__ import annotations
 

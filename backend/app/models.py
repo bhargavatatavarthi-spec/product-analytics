@@ -4,8 +4,7 @@ The import pipeline is snapshot-based: clients deliver a *daily drop* — a file
 listing every live lead and its current sub-stage on that date. We store each
 drop's metadata (`DailyDrop`), the reconstructed per-lead state (`Lead`), and
 the sequence of distinct stage observations per lead (`StageEvent`). Analytics
-are computed from these three tables plus the per-stage classification overrides
-(`StageClassification`) and global `Setting`s.
+are computed from these three tables plus global `Setting`s.
 """
 from __future__ import annotations
 
@@ -106,17 +105,6 @@ class StageEvent(Base):
     observed_on: Mapped[date] = mapped_column(Date, index=True)
 
     lead: Mapped["Lead"] = relationship(back_populates="events")
-
-
-class StageClassification(Base):
-    """Analyst override of a stage's bucket (Won/In-flight/Lost/Unclassified)."""
-
-    __tablename__ = "stage_classifications"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    stage: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    bucket: Mapped[str] = mapped_column(String(16))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class Setting(Base):
