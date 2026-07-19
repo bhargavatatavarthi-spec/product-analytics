@@ -338,17 +338,17 @@ async function renderCohort() {
       h("span", { style: { fontSize: "11px", color: "var(--ss-fg-subtle)" } }, row.size_label)),
     row.cells.map((cell) => {
       if (!cell.mature) {
-        return h("div", { style: Object.assign({}, cellBase, { background: "repeating-linear-gradient(45deg,#f4f2f9,#f4f2f9 4px,#e7e3f2 4px,#e7e3f2 8px)", color: "#c3bed0" }), title: "Not yet mature" }, "");
+        return h("div", { style: Object.assign({}, cellBase, { background: "repeating-linear-gradient(45deg,#f4f2f9,#f4f2f9 4px,#e7e3f2 4px,#e7e3f2 8px)", color: "#c3bed0" }) }, "");
       }
       const t = cell.value / 100;
-      return h("div", { style: Object.assign({}, cellBase, { background: heat(t), color: t > 0.5 ? "#fff" : "var(--ss-darkmatter)" }), title: `${row.date} cohort · ${cell.text} reached ${state.milestone}` }, cell.text);
+      return h("div", { style: Object.assign({}, cellBase, { background: heat(t), color: t > 0.5 ? "#fff" : "var(--ss-darkmatter)" }), title: `${row.date} cohort at ${row.age}d old · ${cell.text} now at/past ${state.milestone}` }, cell.text);
     })));
 
   const summaryCard = h("div", { class: "card", style: { padding: "18px" } },
     h("div", { class: "ss-eyebrow", style: { marginBottom: "12px" } }, "Cohort summary"),
-    summaryStat("Avg days to " + d.milestone_short, d.summary.avg_days, " days"),
-    summaryStat("Cohorts typically plateau", "Day " + d.summary.plateau_day, ""),
-    summaryStat("Mature cohorts", d.summary.mature_cohorts, " of " + d.summary.total_cohorts));
+    summaryStat("At/past " + d.milestone_short + " (all)", d.summary.overall_pct, "%"),
+    summaryStat("Newest cohort (today)", d.summary.newest_pct, "%"),
+    summaryStat("Oldest cohort (13d)", d.summary.oldest_pct, "%"));
 
   const legendCard = h("div", { class: "card", style: { padding: "18px" } },
     h("div", { class: "ss-eyebrow", style: { marginBottom: "12px" } }, "Legend"),
@@ -356,18 +356,12 @@ async function renderCohort() {
     h("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "11px", color: "var(--ss-fg-subtle)", fontWeight: "600", marginBottom: "14px" } }, h("span", null, "Low"), h("span", null, "High reach")),
     h("div", { style: { display: "flex", alignItems: "center", gap: "9px" } },
       h("span", { style: { width: "26px", height: "20px", flex: "none", borderRadius: "3px", background: "repeating-linear-gradient(45deg,#f4f2f9,#f4f2f9 4px,#e7e3f2 4px,#e7e3f2 8px)", border: "1px solid var(--ss-border)" } }),
-      h("span", { style: { fontSize: "12px", fontWeight: "600", color: "var(--ss-fg-muted)" } }, "Not yet mature")));
-
-  const needsDates = d.milestone_dated === false;
-  const dateNote = needsDates ? h("div", { class: "callout", style: { marginBottom: "20px" } },
-    svg(`<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>`, { stroke: "var(--ss-lucid)", w: 20, sw: 2 }),
-    h("div", { class: "callout-text" }, `No “${state.milestone}” date in the imported feed yet, so this cohort can't be measured. Include that milestone's date column (e.g. ${d.date_field}) in your drop and it will populate — the other milestones with dates already work.`)) : null;
+      h("span", { style: { fontSize: "12px", fontWeight: "600", color: "var(--ss-fg-muted)" } }, "Not observed at this age")));
 
   setContent(h("div", null,
     h("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "20px", marginBottom: "20px", flexWrap: "wrap" } },
-      h("p", { style: { margin: "0", maxWidth: "640px", fontSize: "13.5px", color: "var(--ss-fg-muted)", lineHeight: "1.5" }, html: 'Rows are entry-date (Created Date) cohorts; columns are days since entry. Each cell is the share of that cohort that reached the milestone by that day, using the milestone\'s own date. Cells without enough elapsed time are <strong style="color:var(--ss-fg)">not yet mature</strong> — never counted as failure.' }),
+      h("p", { style: { margin: "0", maxWidth: "660px", fontSize: "13.5px", color: "var(--ss-fg-muted)", lineHeight: "1.5" }, html: 'Rows are Created-Date cohorts; the column is days since entry (today − Created Date). Each cohort is measured once — at its current age — showing the share now <strong style="color:var(--ss-fg)">at or past</strong> the milestone. Other columns are un-observed: a single daily snapshot can\'t show a cohort at an earlier age.' }),
       h("div", null, h("div", { style: { fontSize: "10px", fontWeight: "600", letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ss-fg-subtle)", marginBottom: "6px" } }, "Milestone reached"), milestoneCtrls)),
-    dateNote,
     h("div", { class: "triangle-wrap" },
       h("div", { class: "triangle" }, h("div", { class: "triangle-inner" }, header, ...rows)),
       h("div", { class: "cohort-side" }, summaryCard, legendCard))));

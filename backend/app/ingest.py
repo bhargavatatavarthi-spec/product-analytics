@@ -414,8 +414,8 @@ def ingest_drop(
                    "offer_generated_on", "offer_selected_on", "aa_initiated_on", "disbursement_on")
     detected_dates = [f for f in MILESTONE_DATE_FIELDS if resolved_mapping.get(f)]
     cols = (Lead.id, Lead.lead_id, Lead.current_stage, Lead.stage_entered_on,
-            Lead.last_seen_on, Lead.entry_date, Lead.first_seen_on, Lead.na_cells,
-            Lead.voice_connected, Lead.call_count, Lead.had_backward_move,
+            Lead.last_seen_on, Lead.entry_date, Lead.created_on, Lead.first_seen_on,
+            Lead.na_cells, Lead.voice_connected, Lead.call_count, Lead.had_backward_move,
             *[getattr(Lead, f) for f in META_FIELDS])
 
     # Chunk size stays within SQLite's 999 bound-parameter cap for the IN(...)
@@ -496,6 +496,7 @@ def ingest_drop(
                 new_lead_maps.append({
                     "lead_id": lid, "current_stage": initial_stage,
                     "entry_date": v["entry_date"] or the_date,
+                    "created_on": v["entry_date"],
                     "stage_entered_on": the_date, "first_seen_on": the_date, "last_seen_on": the_date,
                     "voice_connected": v["voice_connected"], "call_count": v["call_count"],
                     "na_cells": v["na_cells"], "had_backward_move": False,
@@ -531,6 +532,8 @@ def ingest_drop(
                 "last_seen_on": the_date if is_latest else cur["last_seen_on"],
                 "entry_date": (min(cur["entry_date"] or v["entry_date"], v["entry_date"])
                                if v["entry_date"] else cur["entry_date"]),
+                "created_on": (min(cur["created_on"] or v["entry_date"], v["entry_date"])
+                              if v["entry_date"] else cur["created_on"]),
                 "na_cells": (cur["na_cells"] or 0) + v["na_cells"],
                 "voice_connected": bool(cur["voice_connected"]) or v["voice_connected"],
                 "call_count": max(cur["call_count"] or 0, v["call_count"]),
