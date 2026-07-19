@@ -1,7 +1,7 @@
 """Analytics computations.
 
 Every screen is derived here from the reconstructed data (`Lead` / `StageEvent`
-/ `DailyDrop`) plus the analyst's stage-classification overrides and settings.
+/ `DailyDrop`) plus the global settings.
 
 Aggregation happens in SQL (`GROUP BY`), not by pulling rows into Python: a
 screen's counts come back as ~20 grouped rows regardless of whether the table
@@ -18,7 +18,7 @@ from sqlalchemy import Integer, and_, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from . import catalog
-from .models import DailyDrop, Lead, StageClassification, StageEvent, Setting
+from .models import DailyDrop, Lead, StageEvent, Setting
 
 DEFAULT_SETTINGS = {"aging_threshold": "21", "default_milestone": catalog.DEFAULT_MILESTONE}
 
@@ -51,10 +51,6 @@ def get_as_of(db: Session) -> date:
     return db.execute(select(func.max(DailyDrop.drop_date))).scalar() or date.today()
 
 
-def get_overrides(db: Session) -> dict[str, str]:
-    return {c.stage: c.bucket for c in db.execute(select(StageClassification)).scalars()}
-
-
 def get_settings(db: Session) -> dict[str, str]:
     values = dict(DEFAULT_SETTINGS)
     for s in db.execute(select(Setting)).scalars():
@@ -62,9 +58,7 @@ def get_settings(db: Session) -> dict[str, str]:
     return values
 
 
-def effective_bucket(stage: str, overrides: dict[str, str]) -> str:
-    if stage in overrides:
-        return overrides[stage]
+def effective_bucket(stage: str) -> str:
     return catalog.default_bucket_for(stage)
 
 
@@ -91,10 +85,10 @@ def _stage_counts(db: Session, start: date | None, end: date) -> dict[str, int]:
     return {stage: count for stage, count in db.execute(stmt).all()}
 
 
-def _bucketize(stage_counts: dict[str, int], overrides: dict[str, str]) -> dict[str, int]:
+def _bucketize(stage_counts: dict[str, int]) -> dict[str, int]:
     counts = {b: 0 for b in catalog.BUCKETS}
     for stage, c in stage_counts.items():
-        counts[effective_bucket(stage, overrides)] += c
+        counts[effective_bucket(stage)] += c
     return counts
 
 
@@ -107,23 +101,22 @@ def _days_in_stage(as_of: date):
     )
 
 
-def _won_stages(overrides: dict[str, str]) -> list[str]:
-    return [s for s, b in {**catalog.DEFAULT_BUCKET, **overrides}.items() if b == "won"]
+def _won_stages() -> list[str]:
+    return [s for s, b in catalog.DEFAULT_BUCKET.items() if b == "won"]
 
 
 # ─────────────────────────── range summaries ───────────────────────────
 def range_summaries(db: Session) -> dict:
     as_of = get_as_of(db)
-    overrides = get_overrides(db)
     out = {}
     for r in catalog.RANGES:
         start, end = range_window(as_of, r["key"])
-        counts = _bucketize(_stage_counts(db, start, end), overrides)
+        counts = _bucketize(_stage_counts(db, start, end))
         entered = sum(counts.values())
         delta = None
         if r["days"] is not None and start is not None:
             prev = _bucketize(
-                _stage_counts(db, start - timedelta(days=r["days"]), start - timedelta(days=1)), overrides
+                _stage_counts(db, start - timedelta(days=r["days"]), start - timedelta(days=1))
             )
             delta = {
                 b: (None if not prev[b] else round((counts[b] - prev[b]) / prev[b] * 100))
@@ -136,20 +129,19 @@ def range_summaries(db: Session) -> dict:
 # ─────────────────────────── overview ───────────────────────────
 def overview(db: Session, range_key: str) -> dict:
     as_of = get_as_of(db)
-    overrides = get_overrides(db)
     settings = get_settings(db)
     aging_threshold = int(settings["aging_threshold"])
     start, end = range_window(as_of, range_key)
 
     stage_counts = _stage_counts(db, start, end)
-    counts = _bucketize(stage_counts, overrides)
+    counts = _bucketize(stage_counts)
     entered = sum(counts.values())
 
     days = catalog.RANGE_DAYS.get(range_key)
     delta = None
     if days is not None and start is not None:
         prev = _bucketize(
-            _stage_counts(db, start - timedelta(days=days), start - timedelta(days=1)), overrides
+            _stage_counts(db, start - timedelta(days=days), start - timedelta(days=1))
         )
         delta = {
             b: (None if not prev[b] else round((counts[b] - prev[b]) / prev[b] * 100))
@@ -181,7 +173,7 @@ def overview(db: Session, range_key: str) -> dict:
     bar_counts = [0] * len(catalog.AGING_BUCKETS)
     inflight_count = stalled = 0
     for stage, b, c in db.execute(age_stmt).all():
-        if effective_bucket(stage, overrides) != "inflight":
+        if effective_bucket(stage) != "inflight":
             continue
         bar_counts[b] += c
         inflight_count += c
@@ -318,79 +310,11 @@ def cohort(db: Session, milestone_label: str) -> dict:
     }
 
 
-# ─────────────────────────── stage explorer ───────────────────────────
-def _median_from_hist(pairs: list[tuple[int, int]], n: int) -> float:
-    if n == 0:
-        return 0.0
-    pairs = sorted(pairs)
-    lo, hi = (n - 1) // 2, n // 2
-    cum = 0
-    v_lo = v_hi = pairs[-1][0]
-    got_lo = False
-    for d, c in pairs:
-        cum += c
-        if not got_lo and cum > lo:
-            v_lo, got_lo = d, True
-        if cum > hi:
-            v_hi = d
-            break
-    return (v_lo + v_hi) / 2
-
-
-def stages(db: Session, range_key: str, stage_filter: str = "all") -> dict:
-    as_of = get_as_of(db)
-    overrides = get_overrides(db)
-    start, end = range_window(as_of, range_key)
-
-    dis = _days_in_stage(as_of)
-    stmt = _apply_window(
-        select(Lead.current_stage, dis.label("d"), func.count()), start, end
-    ).group_by(Lead.current_stage, dis)
-
-    hist: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    totals: dict[str, int] = defaultdict(int)
-    for stage, d, c in db.execute(stmt).all():
-        hist[stage].append((int(d or 0), c))
-        totals[stage] += c
-
-    rows = []
-    bucket_counts = {"all": 0, "unclassified": 0, "won": 0, "inflight": 0, "lost": 0}
-    for stage_name, n in totals.items():
-        bucket = effective_bucket(stage_name, overrides)
-        median_days = _median_from_hist(hist[stage_name], n)
-        rows.append(
-            {
-                "name": stage_name,
-                "bucket": bucket,
-                "is_unclassified": bucket == "unclassified",
-                "count": n,
-                "count_label": indian_format(n),
-                "median": f"{median_days:.1f} d",
-                "known": stage_name in catalog.STAGE_ORDER,
-            }
-        )
-        bucket_counts["all"] += 1
-        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
-
-    rows.sort(key=lambda r: (0 if r["is_unclassified"] else 1, -r["count"]))
-    filtered = rows if stage_filter == "all" else [r for r in rows if r["bucket"] == stage_filter]
-    return {
-        "as_of": as_of.isoformat(),
-        "range": range_key,
-        "filter": stage_filter,
-        "rows": filtered,
-        "bucket_counts": bucket_counts,
-        "unclassified_count": bucket_counts["unclassified"],
-        "empty": len(filtered) == 0,
-    }
-
-
 # ─────────────────────────── attribution ───────────────────────────
 def attribution(db: Session, range_key: str, dim_key: str = "amount") -> dict:
     as_of = get_as_of(db)
-    overrides = get_overrides(db)
     start, end = range_window(as_of, range_key)
-    won_stages = _won_stages(overrides)
+    won_stages = _won_stages()
 
     # Voice vs organic split over disbursals — grouped in SQL.
     voice_won = organic_won = 0
@@ -576,47 +500,3 @@ def _stage_attribution(db: Session, won_stages: list[str], start: date | None, e
     return rows[:6]
 
 
-# ─────────────────────────── data health ───────────────────────────
-def health(db: Session) -> dict:
-    as_of = get_as_of(db)
-    drops = {d.drop_date: d for d in db.execute(select(DailyDrop)).scalars()}
-    days = []
-    present = 0
-    for i in range(30):
-        d = as_of - timedelta(days=29 - i)
-        drop = drops.get(d)
-        if drop is None:
-            status = "missing"
-        else:
-            status = "partial" if drop.status == "partial" else "received"
-            present += 1
-        days.append({"date": d.strftime("%d %b"), "status": status})
-    completeness = round(present / 30 * 100) if drops else 0
-
-    na_rows = db.execute(select(func.count(Lead.id)).where(Lead.na_cells > 0)).scalar_one()
-    overrides = get_overrides(db)
-    won_stages = _won_stages(overrides)
-    zero_disb = (
-        db.execute(
-            select(func.count(Lead.id)).where(
-                Lead.current_stage.in_(won_stages),
-                or_(Lead.disbursed_amount.is_(None), Lead.disbursed_amount == 0),
-            )
-        ).scalar_one()
-        if won_stages
-        else 0
-    )
-    backward = db.execute(select(func.count(Lead.id)).where(Lead.had_backward_move.is_(True))).scalar_one()
-
-    flags = [
-        {"count": indian_format(na_rows), "label": "Rows with cell errors", "note": "leads with #VALUE!/#REF! source cells"},
-        {"count": indian_format(zero_disb), "label": "Zero-value disbursals", "note": "flagged for review"},
-        {"count": indian_format(backward), "label": "Backward stage moves", "note": "correction vs. real regression"},
-    ]
-    return {
-        "as_of": as_of.isoformat(),
-        "completeness": completeness,
-        "days": days,
-        "flags": flags,
-        "total_drops": len(drops),
-    }

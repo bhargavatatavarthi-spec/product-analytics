@@ -1,10 +1,10 @@
 # Kotak PAL — Journey Analyzer
 
 A deployable, full-stack analytics app for the Kotak PAL lending journey. It
-turns daily client data drops into six live dashboards — Overview, Cohort
-Triangle, Stage Explorer, Attribution, Data Health and Settings — and ships
-with a **manual data-import** flow so an analyst can upload a drop and see it
-folded into the analytics immediately.
+turns daily client data drops into four live dashboards — Overview, Cohort
+Triangle, Attribution and Settings — and ships with a **manual data-import**
+flow so an analyst can upload a drop and see it folded into the analytics
+immediately.
 
 It started as a static design prototype (`Kotak PAL.dc.html`). This repo turns
 that prototype into a real product: a **Python (FastAPI) backend** that
@@ -44,12 +44,11 @@ Key ideas:
   on `offer_id`.
 - **No PII stored.** `name` and `mobile` are ignored — they power no insight.
 - **`#N/A` is a null, not an error.** Clients use `#N/A` pervasively as their
-  empty token, so it is treated as absence (only real cell errors like
-  `#VALUE!`/`#REF!` are flagged in Data Health).
+  empty token, so it is treated as absence.
 - **Leads with no journey stage** (`DIY Sub-Stage = #N/A`) — the ~98% of dialed
   leads not (yet) in the offer journey — are recorded as **"Not in DIY Journey"**
   (Unclassified). Their call outcomes still feed Attribution; they're excluded
-  from Won/In-flight/Lost until an analyst decides otherwise in Stage Explorer.
+  from the Won/In-flight/Lost buckets.
 - **Forgiving parser.** Fuzzy column auto-mapping, `₹`/`%`/comma stripping, and
   date-format **auto-detection** (handles both `DD-MM-YYYY` and `M/D/YYYY`).
 
@@ -59,7 +58,7 @@ Key ideas:
 populated dashboard. Everything else enriches specific panels and **degrades
 gracefully** (honest empty states, never fabricated numbers):
 
-- **stage** → Overview buckets, Stage Explorer
+- **stage** → Overview buckets
 - **entry_date (Created Date)** → cohort rows, range filters, time-in-stage
 - **milestone dates** (optional: offer-generated / offer-selected / DIA-AA-initiated
   / disbursement date) → the **Cohort Triangle**. Reach = milestone_date −
@@ -134,10 +133,7 @@ KPAL_DATABASE_URL="postgresql+psycopg://user:pass@host:5432/kpal"
 | `GET` | `/api/meta` | Ranges, milestones, dimensions, settings, per-range summaries |
 | `GET` | `/api/overview?range=` | Buckets, deltas, aging |
 | `GET` | `/api/cohort?milestone=` | Cohort-triangle grid + summary |
-| `GET` | `/api/stages?range=&filter=` | Sub-stages, counts, medians |
-| `POST` | `/api/stages/classify` | Override a stage's bucket |
 | `GET` | `/api/attribution?range=&dim=` | Voice/organic split, call outcomes, metadata cuts |
-| `GET` | `/api/health-report` | Drop ledger, completeness, quality flags |
 | `GET`/`POST` | `/api/settings` | Aging threshold, default milestone |
 | `POST` | `/api/import/preview` | Upload → auto-mapping + parsed sample (no write) |
 | `POST` | `/api/import/commit` | Ingest a drop |
@@ -173,7 +169,7 @@ backend/app/
   catalog.py     Journey stage order, default buckets, milestones, dimensions
   models.py      SQLAlchemy models (DailyDrop, Lead, StageEvent, ...)
   ingest.py      CSV parsing, column mapping, journey reconstruction
-  analytics.py   All six screens computed from the data
+  analytics.py   All dashboard screens computed from the data
   seed.py        Deterministic demo generator (uses the real import path)
   routers/       api.py (analytics/settings) + imports.py (upload)
 frontend/        index.html + assets/ (dependency-free SPA, SquadStack design)

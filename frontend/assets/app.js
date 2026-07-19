@@ -61,7 +61,6 @@ const state = {
   range: "30d",
   milestone: "Disbursement Completed",
   aging: 21,
-  stageFilter: "all",
   attrDim: "amount",
   rangeOpen: false,
   meta: null,
@@ -73,18 +72,14 @@ const BUCKET_LABELS = { won: "Won", inflight: "In-flight", lost: "Lost", unclass
 const NAV = [
   { key: "overview", label: "Overview", icon: `<rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/>` },
   { key: "cohort", label: "Cohort Triangle", icon: `<path d="M3 3h18L3 21z"/><path d="M3 9h9"/><path d="M3 15h4"/>` },
-  { key: "stages", label: "Stage Explorer", icon: `<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>` },
   { key: "attribution", label: "Attribution", icon: `<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>` },
-  { key: "health", label: "Data Health", icon: `<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>` },
   { key: "import", label: "Data Import", icon: `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>` },
 ];
 
 const SCREEN_META = {
   overview: ["Overview", "The whole entered population, split into Won, In-flight and Lost"],
   cohort: ["Cohort Triangle", "Milestone reach by entry-date cohort and days since entry"],
-  stages: ["Stage Explorer", "Every journey sub-stage, its bucket, and time-in-stage"],
   attribution: ["Attribution", "Lead metadata, call outcomes and journey-stage credit for every disbursal"],
-  health: ["Data Health", "Daily drop ledger, completeness and data-quality flags"],
   import: ["Data Import", "Upload a daily offer or journey drop and fold it into the analytics"],
 };
 
@@ -156,15 +151,6 @@ function renderTopbar() {
       h("div", { style: { borderTop: "1px solid var(--ss-border)", marginTop: "4px", padding: "10px 12px 6px", fontSize: "11.5px", color: "var(--ss-fg-subtle)", lineHeight: "1.4" } },
         "Filters every screen consistently by entry-date.")));
   }
-
-  // Completeness chip
-  const chip = document.getElementById("completeness-chip");
-  const c = state._completeness ?? 0;
-  chip.innerHTML = "";
-  chip.appendChild(h("div", { style: { lineHeight: "1" } },
-    h("div", { class: "chip-label" }, "Data completeness"),
-    h("div", { class: "chip-value" }, c + "%")));
-  chip.appendChild(h("div", { class: "chip-bar" }, h("div", { style: { width: c + "%" } })));
 }
 
 function renderAnchor(entered, buckets) {
@@ -204,9 +190,7 @@ async function render() {
     switch (state.screen) {
       case "overview": return await renderOverview();
       case "cohort": return await renderCohort();
-      case "stages": return await renderStages();
       case "attribution": return await renderAttribution();
-      case "health": return await renderHealth();
       case "settings": return await renderSettings();
       case "import": return await renderImport();
     }
@@ -218,8 +202,6 @@ async function render() {
 // ═══════════════════════════ OVERVIEW ═══════════════════════════
 async function renderOverview() {
   const d = await API.get(`/api/overview?range=${state.range}`);
-  state._completeness = state.meta?._completeness ?? state._completeness;
-  renderTopbar();
   renderAnchor(d.entered, d.buckets);
 
   const dot = (c) => h("span", { class: "dot", style: { background: c } });
@@ -373,71 +355,6 @@ function summaryStat(label, value, suffix) {
     h("div", { style: { fontSize: "26px", fontWeight: "800", letterSpacing: "-0.02em", color: label.startsWith("Avg") ? "var(--ss-lucid)" : "var(--ss-fg)" } }, String(value), suffix ? h("span", { style: { fontSize: "15px", color: "var(--ss-fg-muted)", fontWeight: "600" } }, suffix) : null));
 }
 
-// ═══════════════════════════ STAGE EXPLORER ═══════════════════════════
-async function renderStages() {
-  updateAnchor();
-  const d = await API.get(`/api/stages?range=${state.range}&filter=${state.stageFilter}`);
-  const bc = d.bucket_counts;
-
-  const filterCtrls = h("div", { class: "seg" },
-    [["all", "All " + bc.all], ["unclassified", "Unclassified " + (bc.unclassified || 0)], ["won", "Won " + (bc.won || 0)], ["inflight", "In-flight " + (bc.inflight || 0)], ["lost", "Lost " + (bc.lost || 0)]]
-      .map(([val, label]) => h("button", { class: "seg-btn" + (val === state.stageFilter ? " active" : ""), onClick: () => { state.stageFilter = val; render(); } }, label)));
-
-  const head = h("div", { class: "stage-head" },
-    h("div", { style: { flex: "1" } }, "Journey sub-stage"),
-    h("div", { style: { width: "170px", flex: "none" } }, "Classification"),
-    h("div", { style: { width: "150px", flex: "none" } }, "Assign"),
-    h("div", { style: { width: "110px", flex: "none", textAlign: "right" } }, "Lead count"),
-    h("div", { style: { width: "110px", flex: "none", textAlign: "right" } }, "Median in stage"));
-
-  let body;
-  if (d.empty) {
-    body = h("div", { class: "empty-state" },
-      svg(`<path d="M20 6 9 17l-5-5"/>`, { stroke: "var(--ss-lucid)", w: 28, sw: 1.8 }),
-      h("div", { class: "empty-title" }, "Nothing to show here"),
-      h("div", { class: "empty-msg" }, state.stageFilter === "unclassified" ? "Every stage is mapped to a bucket. No terminal state is silently hiding dead leads as pipeline." : "No stages fall in this bucket for the current selection."));
-  } else {
-    body = h("div", null, d.rows.map((s) => {
-      const unclassified = s.is_unclassified;
-      const color = BUCKET_COLORS[s.bucket];
-      const badge = unclassified
-        ? h("span", { class: "badge", style: { background: "var(--ss-pale-lucid-tint)", color: "var(--ss-lucid)", border: "1px solid var(--ss-lucid)" } }, "Needs classification")
-        : h("span", { class: "badge", style: { color, border: "1px solid " + (s.bucket === "inflight" ? "var(--ss-border)" : color) } }, BUCKET_LABELS[s.bucket]);
-      const select = h("select", { class: "stage-select", onChange: (e) => classifyStage(s.name, e.target.value) },
-        [["unclassified", "Unclassified"], ["won", "Won"], ["inflight", "In-flight"], ["lost", "Lost"]]
-          .map(([v, l]) => h("option", { value: v, selected: v === s.bucket }, l)));
-      return h("div", { class: "stage-row" + (unclassified ? " unclassified" : "") },
-        h("div", { style: { flex: "1", display: "flex", alignItems: "center", gap: "10px", fontSize: "14px", fontWeight: "600" } },
-          h("span", { style: { width: "8px", height: "8px", borderRadius: "2px", flex: "none", background: unclassified ? "transparent" : color, border: unclassified ? "2px solid var(--ss-lucid)" : "none" } }),
-          s.name, s.known ? null : h("span", { style: { fontSize: "10px", fontWeight: "700", color: "var(--ss-lucid)", textTransform: "uppercase" } }, "new")),
-        h("div", { style: { width: "170px", flex: "none" } }, badge),
-        h("div", { style: { width: "150px", flex: "none" } }, select),
-        h("div", { style: { width: "110px", flex: "none", textAlign: "right", fontSize: "14px", fontWeight: "700" } }, s.count_label),
-        h("div", { style: { width: "110px", flex: "none", textAlign: "right", fontSize: "13.5px", color: "var(--ss-fg-muted)", fontWeight: "600" } }, s.median));
-    }));
-  }
-
-  const warn = d.unclassified_count > 0
-    ? h("div", { style: { display: "flex", alignItems: "center", gap: "14px", background: "var(--ss-pale-lucid-tint)", borderLeft: "4px solid var(--ss-lucid)", borderRadius: "0 6px 6px 0", padding: "14px 20px", marginBottom: "22px" } },
-        svg(`<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>`, { stroke: "var(--ss-lucid)", w: 20, sw: 2 }),
-        h("div", { style: { fontSize: "14px", fontWeight: "600", lineHeight: "1.4" }, html: `<strong>${d.unclassified_count} stage(s) need classification.</strong> Until mapped to Won, Lost or In-flight, their leads are excluded from every bucket count.` }))
-    : null;
-
-  setContent(h("div", { class: "wrap" }, warn,
-    h("div", { style: { display: "flex", alignItems: "center", gap: "14px", marginBottom: "16px", flexWrap: "wrap" } },
-      h("span", { style: { fontSize: "10px", fontWeight: "700", letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ss-fg-subtle)" } }, "Filter by bucket"), filterCtrls),
-    h("div", { class: "stage-table" }, head, body)));
-}
-
-async function classifyStage(name, bucket) {
-  try {
-    await API.post("/api/stages/classify", { stage: name, bucket });
-    state.meta = await API.get("/api/meta");
-    toast(`“${name}” → ${BUCKET_LABELS[bucket]}`, "success");
-    render();
-  } catch (e) { toast("Classification failed: " + e.message, "error"); }
-}
-
 // ═══════════════════════════ ATTRIBUTION ═══════════════════════════
 async function renderAttribution() {
   updateAnchor();
@@ -522,38 +439,6 @@ async function renderAttribution() {
   setContent(h("div", { style: { maxWidth: "1120px" } }, hero, cards, outcomes, metaCard, stageCard));
 }
 
-// ═══════════════════════════ DATA HEALTH ═══════════════════════════
-async function renderHealth() {
-  updateAnchor();
-  const d = await API.get("/api/health-report");
-  state._completeness = d.completeness;
-  renderTopbar();
-
-  const dayColor = { received: "var(--ss-lucid)", partial: "var(--ss-pale-lucid-tint)", missing: "#E0DDE6" };
-  const days = h("div", { class: "health-days" },
-    d.days.map((day) => h("div", { class: "health-day", style: { background: dayColor[day.status], border: day.status === "partial" ? "1px solid var(--ss-lucid)" : "none" }, title: day.date + " — " + day.status })));
-
-  const legend = h("div", { style: { display: "flex", gap: "20px" } },
-    [["Received", "var(--ss-lucid)", "none"], ["Partial", "var(--ss-pale-lucid-tint)", "1px solid var(--ss-lucid)"], ["Missing", "#E0DDE6", "none"]]
-      .map(([l, bg, br]) => h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } }, h("span", { style: { width: "14px", height: "14px", borderRadius: "3px", background: bg, border: br } }), h("span", { style: { fontSize: "12px", fontWeight: "600" } }, l))));
-
-  setContent(h("div", { style: { maxWidth: "1100px" } },
-    h("div", { class: "health-grid" },
-      h("div", { class: "card", style: { padding: "22px" } },
-        h("div", { class: "ss-eyebrow", style: { marginBottom: "10px" } }, "Completeness"),
-        h("div", { style: { fontSize: "46px", fontWeight: "800", letterSpacing: "-0.03em", lineHeight: "1", color: "var(--ss-lucid)" } }, d.completeness + "%"),
-        h("p", { style: { margin: "12px 0 0", fontSize: "12.5px", color: "var(--ss-fg-muted)", lineHeight: "1.5" } }, "Missing daily drops break the reconstructed lead history and are flagged below.")),
-      h("div", { class: "card", style: { padding: "22px" } },
-        h("div", { class: "ss-eyebrow", style: { marginBottom: "16px" } }, "Daily client drops — last 30 days"),
-        days, legend)),
-    h("div", { class: "ss-eyebrow", style: { marginBottom: "12px" } }, "Data-quality flags"),
-    h("div", { class: "grid-3" },
-      d.flags.map((f) => h("div", { style: { border: "1px solid var(--ss-border)", borderLeft: "4px solid var(--ss-lucid)", borderRadius: "0 8px 8px 0", padding: "20px" } },
-        h("div", { style: { fontSize: "30px", fontWeight: "800", letterSpacing: "-0.02em", lineHeight: "1" } }, f.count),
-        h("div", { style: { fontSize: "14px", fontWeight: "700", marginTop: "8px" } }, f.label),
-        h("div", { style: { fontSize: "12.5px", color: "var(--ss-fg-subtle)", marginTop: "3px" } }, f.note))))));
-}
-
 // ═══════════════════════════ SETTINGS ═══════════════════════════
 async function renderSettings() {
   updateAnchor();
@@ -573,7 +458,7 @@ async function renderSettings() {
         (state.meta?.milestones || []).map((m) => h("button", { class: "seg-btn" + (m.label === s.default_milestone ? " active" : ""), onClick: () => setMilestoneDefault(m.label) }, m.label)))),
     h("div", { style: { display: "flex", gap: "12px", background: "var(--ss-pale-lucid-tint)", borderLeft: "4px solid var(--ss-lucid)", borderRadius: "0 6px 6px 0", padding: "16px 20px" } },
       svg(`<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`, { stroke: "var(--ss-lucid)", w: 18, sw: 2 }),
-      h("div", { style: { fontSize: "13.5px", fontWeight: "500", lineHeight: "1.5" } }, "Kotak PAL is read-only analytics apart from two write actions: the Stage Explorer classifier and manual Data Import."))));
+      h("div", { style: { fontSize: "13.5px", fontWeight: "500", lineHeight: "1.5" } }, "Kotak PAL is read-only analytics apart from one write action: manual Data Import."))));
 }
 async function setMilestoneDefault(label) {
   try { await API.post("/api/settings", { default_milestone: label }); state.milestone = label; toast("Default milestone updated", "success"); render(); } catch (e) { toast(e.message, "error"); }
@@ -697,7 +582,6 @@ async function boot() {
     const s = state.meta.settings || {};
     if (s.default_milestone) state.milestone = s.default_milestone;
     if (s.aging_threshold) state.aging = parseInt(s.aging_threshold, 10);
-    try { state._completeness = (await API.get("/api/health-report")).completeness; } catch (e) {}
     render();
   } catch (e) {
     document.getElementById("content").appendChild(h("div", { class: "loading-panel" }, "Backend unavailable: " + e.message));
