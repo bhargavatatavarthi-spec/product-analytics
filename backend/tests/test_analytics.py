@@ -47,7 +47,7 @@ def test_unclassified_bucket_default(db):
     assert ov["buckets"]["unclassified"]["count"] == 1  # On Hold defaults unclassified
 
 
-def test_cohort_places_value_at_cohort_age(db):
+def test_cohort_single_snapshot_observes_only_that_day(db):
     today = date.today()
     old = today - timedelta(days=8)  # cohort is 8 days old
     ingest.ingest_drop(db, _journey_csv([
@@ -61,13 +61,39 @@ def test_cohort_places_value_at_cohort_age(db):
     assert len(co["rows"]) == 14
     row = next(r for r in co["rows"] if r["size"] == 4)
     assert row["age"] == 8
-    # Exactly one observed cell — at column D8 (the cohort's age).
+    # Only one snapshot exists (today = D8), so only D8 is observed.
     observed = [(i, c["value"]) for i, c in enumerate(row["cells"]) if c["mature"]]
     assert len(observed) == 1
     day, value = observed[0]
     assert day == 8
     # 3 of 4 (Offer Review, Disbursement, Offer Generated) are at/past Offer Generated.
     assert value == 75.0
+
+
+def test_cohort_fills_triangle_from_snapshot_history(db):
+    """With drops on successive days the row fills in as a rising curve."""
+    today = date.today()
+    old = today - timedelta(days=3)  # cohort created 3 days ago
+    d1 = old + timedelta(days=1)
+    # Day 1 snapshot: A has reached Offer Generated, B has not yet.
+    ingest.ingest_drop(db, _journey_csv([
+        ("A", "Interested", old.isoformat(), "OFFER_GENERATED", ""),
+        ("B", "Interested", old.isoformat(), "NOT_INTERESTED", ""),
+    ]), filename="d1.csv", drop_date=d1)
+    # Day 3 snapshot: B has now also reached Offer Generated.
+    ingest.ingest_drop(db, _journey_csv([
+        ("A", "Interested", old.isoformat(), "OFFER_GENERATED", ""),
+        ("B", "Interested", old.isoformat(), "OFFER_GENERATED", ""),
+    ]), filename="d3.csv", drop_date=today)
+
+    row = next(r for r in analytics.cohort(db, "Offer Generated")["rows"] if r["size"] == 2)
+    assert row["age"] == 3
+    # D1 (first drop): 1 of 2 reached = 50%. D3 (second drop): 2 of 2 = 100%.
+    assert row["cells"][1]["mature"] and row["cells"][1]["value"] == 50.0
+    assert row["cells"][3]["mature"] and row["cells"][3]["value"] == 100.0
+    # D0 and D2 had no snapshot -> un-observed.
+    assert not row["cells"][0]["mature"]
+    assert not row["cells"][2]["mature"]
 
 
 def test_cohort_reach_is_at_or_past(db):
@@ -78,7 +104,7 @@ def test_cohort_reach_is_at_or_past(db):
         ("A", "Interested", old.isoformat(), "AA_INITIATED", ""),
     ]), filename="j.csv", drop_date=today)
     row = next(r for r in analytics.cohort(db, "Offer Selected")["rows"] if r["size"] == 1)
-    assert row["cells"][5]["value"] == 100.0  # measured at D5, reached
+    assert row["cells"][5]["value"] == 100.0  # observed at D5, reached
 
 
 def test_dia_date_alias_maps_to_aa_initiated(db):

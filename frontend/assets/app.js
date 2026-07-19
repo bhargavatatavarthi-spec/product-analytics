@@ -318,12 +318,12 @@ async function renderCohort() {
     h("div", { class: "triangle-rowlabel" },
       h("span", { style: { fontSize: "12.5px", fontWeight: "700" } }, row.date),
       h("span", { style: { fontSize: "11px", color: "var(--ss-fg-subtle)" } }, row.size_label)),
-    row.cells.map((cell) => {
+    row.cells.map((cell, i) => {
       if (!cell.mature) {
         return h("div", { style: Object.assign({}, cellBase, { background: "repeating-linear-gradient(45deg,#f4f2f9,#f4f2f9 4px,#e7e3f2 4px,#e7e3f2 8px)", color: "#c3bed0" }) }, "");
       }
       const t = cell.value / 100;
-      return h("div", { style: Object.assign({}, cellBase, { background: heat(t), color: t > 0.5 ? "#fff" : "var(--ss-darkmatter)" }), title: `${row.date} cohort at ${row.age}d old · ${cell.text} now at/past ${state.milestone}` }, cell.text);
+      return h("div", { style: Object.assign({}, cellBase, { background: heat(t), color: t > 0.5 ? "#fff" : "var(--ss-darkmatter)" }), title: `${row.date} cohort · ${cell.text} reached ${state.milestone} by day ${i}` }, cell.text);
     })));
 
   const summaryCard = h("div", { class: "card", style: { padding: "18px" } },
@@ -338,11 +338,11 @@ async function renderCohort() {
     h("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "11px", color: "var(--ss-fg-subtle)", fontWeight: "600", marginBottom: "14px" } }, h("span", null, "Low"), h("span", null, "High reach")),
     h("div", { style: { display: "flex", alignItems: "center", gap: "9px" } },
       h("span", { style: { width: "26px", height: "20px", flex: "none", borderRadius: "3px", background: "repeating-linear-gradient(45deg,#f4f2f9,#f4f2f9 4px,#e7e3f2 4px,#e7e3f2 8px)", border: "1px solid var(--ss-border)" } }),
-      h("span", { style: { fontSize: "12px", fontWeight: "600", color: "var(--ss-fg-muted)" } }, "Not observed at this age")));
+      h("span", { style: { fontSize: "12px", fontWeight: "600", color: "var(--ss-fg-muted)" } }, "No snapshot / beyond cohort age")));
 
   setContent(h("div", null,
     h("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "20px", marginBottom: "20px", flexWrap: "wrap" } },
-      h("p", { style: { margin: "0", maxWidth: "660px", fontSize: "13.5px", color: "var(--ss-fg-muted)", lineHeight: "1.5" }, html: 'Rows are Created-Date cohorts; the column is days since entry (today − Created Date). Each cohort is measured once — at its current age — showing the share now <strong style="color:var(--ss-fg)">at or past</strong> the milestone. Other columns are un-observed: a single daily snapshot can\'t show a cohort at an earlier age.' }),
+      h("p", { style: { margin: "0", maxWidth: "660px", fontSize: "13.5px", color: "var(--ss-fg-muted)", lineHeight: "1.5" }, html: 'Rows are Created-Date cohorts; each column is days since entry. A cell shows the cumulative share of the cohort that had reached (was <strong style="color:var(--ss-fg)">at or past</strong>) the milestone by that day, reconstructed from the daily-drop history. Cells stay blank for day-offsets with no snapshot or beyond a cohort\'s current age.' }),
       h("div", null, h("div", { style: { fontSize: "10px", fontWeight: "600", letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ss-fg-subtle)", marginBottom: "6px" } }, "Milestone reached"), milestoneCtrls)),
     h("div", { class: "triangle-wrap" },
       h("div", { class: "triangle" }, h("div", { class: "triangle-inner" }, header, ...rows)),

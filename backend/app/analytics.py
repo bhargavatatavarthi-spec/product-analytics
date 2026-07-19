@@ -224,15 +224,19 @@ def overview(db: Session, range_key: str) -> dict:
 
 # ─────────────────────────── cohort triangle ───────────────────────────
 def cohort(db: Session, milestone_label: str) -> dict:
-    """Cohort Triangle from a single snapshot + each lead's current stage.
+    """True Cohort Triangle: cumulative milestone reach by days since entry.
 
-    A cohort = all leads with the same Created Date. Its **age** = as_of −
-    Created Date. From one snapshot we can only observe the cohort *once* — today,
-    at its current age — so each cohort's number sits at exactly one column:
-    `Dage`. The number is the % of that cohort whose current DIY stage is at or
-    past the selected milestone (a lead at "Offer Review" has reached "Offer
-    Generated" and "Offer Review"). Columns other than the cohort's age are left
-    un-observed (we never captured that cohort at a different horizon).
+    A cohort = all leads sharing a Created Date; a cohort's **age** = as_of −
+    Created Date. Cell `Dd` shows the share of the cohort that had reached the
+    selected milestone (its DIY stage at or past it) **by day d after entry**.
+
+    Unlike a single snapshot, we can reconstruct *when* each lead reached the
+    milestone from the daily-drop history stored in `StageEvent` (the earliest
+    date we observed the lead at or past the milestone), plus any explicit
+    milestone-date columns the feed supplies. A cohort's row therefore fills in
+    across all the day-offsets on which we actually had a snapshot — a real,
+    rising retention curve, not a lonely diagonal. Columns for day-offsets with
+    no drop (or beyond the cohort's age) stay un-observed.
     """
     as_of = get_as_of(db)
     milestone_order = catalog.MILESTONE_ORDER.get(
@@ -244,43 +248,91 @@ def cohort(db: Session, milestone_label: str) -> dict:
     cohort_dates = [as_of - timedelta(days=13 - i) for i in range(14)]
     earliest = cohort_dates[0]
 
-    # size + reached count per cohort, in one GROUP BY (created_on, current_stage).
-    # Cohorts use the real Created Date (created_on) only — leads with no Created
-    # Date in the feed are excluded rather than lumped into a fake "today" cohort.
-    per: dict[date, dict[str, int]] = defaultdict(lambda: {"size": 0, "reached": 0})
-    for entry, stage, count in db.execute(
-        select(Lead.created_on, Lead.current_stage, func.count())
-        .where(Lead.created_on >= earliest, Lead.created_on <= as_of)
-        .group_by(Lead.created_on, Lead.current_stage)
+    # Calendar dates on which we actually captured a snapshot — cells for
+    # day-offsets without a drop stay un-observed rather than fabricating a value.
+    drop_dates = {
+        d for (d,) in db.execute(select(DailyDrop.drop_date).distinct()).all() if d is not None
+    }
+    if not drop_dates:
+        drop_dates = {
+            d for (d,) in db.execute(select(StageEvent.observed_on).distinct()).all() if d is not None
+        }
+
+    # Cohort sizes: one GROUP BY over the real Created Date (created_on). Leads
+    # with no Created Date in the feed are excluded, not lumped into "today".
+    sizes: dict[date, int] = {
+        entry: count
+        for entry, count in db.execute(
+            select(Lead.created_on, func.count())
+            .where(Lead.created_on >= earliest, Lead.created_on <= as_of)
+            .group_by(Lead.created_on)
+        ).all()
+        if entry is not None
+    }
+
+    # When each lead first reached (at or past) the milestone. Primary signal is
+    # the earliest StageEvent observed at/past the milestone (reconstructed from
+    # the daily drops); we also fold in any explicit milestone-date columns for
+    # this milestone or a later one ("at or past").
+    reach: dict[int, tuple[date, date]] = {}  # lead_pk -> (created_on, reach_date)
+
+    def _note(pk, created, rdate):
+        if pk is None or created is None or rdate is None:
+            return
+        prev = reach.get(pk)
+        reach[pk] = (created, rdate if prev is None else min(prev[1], rdate))
+
+    for pk, created, first_on in db.execute(
+        select(Lead.id, Lead.created_on, func.min(StageEvent.observed_on))
+        .join(StageEvent, StageEvent.lead_pk == Lead.id)
+        .where(Lead.created_on >= earliest, Lead.created_on <= as_of, StageEvent.stage.in_(reached_stages))
+        .group_by(Lead.id, Lead.created_on)
     ).all():
-        if entry is None:
+        _note(pk, created, first_on)
+
+    for date_field in (m["date_field"] for m in catalog.MILESTONES if m["order"] >= milestone_order):
+        col = getattr(Lead, date_field, None)
+        if col is None:
             continue
-        per[entry]["size"] += count
-        if stage in reached_stages:
-            per[entry]["reached"] += count
+        for pk, created, mdate in db.execute(
+            select(Lead.id, Lead.created_on, col).where(
+                Lead.created_on >= earliest, Lead.created_on <= as_of, col.isnot(None)
+            )
+        ).all():
+            _note(pk, created, mdate)
+
+    # Group each cohort's reach dates so a cohort row is built in Python from a
+    # bounded list (the reached leads in a 14-day window), not the whole table.
+    reach_by_cohort: dict[date, list[date]] = defaultdict(list)
+    for created, rdate in reach.values():
+        reach_by_cohort[created].append(rdate)
 
     cols = [{"label": f"D{d}", "full": f"Day {d}"} for d in range(14)]
     rows = []
     total_size = total_reached = 0
     newest_pct = oldest_pct = None
     for c_date in cohort_dates:
-        stats = per.get(c_date, {"size": 0, "reached": 0})
-        size, reached = stats["size"], stats["reached"]
+        size = sizes.get(c_date, 0)
+        reach_dates = reach_by_cohort.get(c_date, [])
+        reached = len(reach_dates)
         age = (as_of - c_date).days
-        pct = round(reached / size * 100, 1) if size else 0.0
         total_size += size
         total_reached += reached
+        pct_now = round(reached / size * 100, 1) if size else 0.0
         if age == 0:
-            newest_pct = pct
+            newest_pct = pct_now
         if age == 13:
-            oldest_pct = pct
-        # Exactly one observed cell, at the cohort's current age (Dage).
+            oldest_pct = pct_now
+        # Cumulative reach at each observed day-offset (a drop existed that day).
         cells = []
         for day in range(14):
-            if day == age and size:
-                cells.append({"mature": True, "value": pct, "text": f"{pct:.1f}%"})
-            else:
+            snap = c_date + timedelta(days=day)
+            if day > age or size == 0 or snap not in drop_dates:
                 cells.append({"mature": False, "value": None, "text": ""})
+                continue
+            cnt = sum(1 for rd in reach_dates if rd <= snap)
+            frac = round(cnt / size * 100, 1)
+            cells.append({"mature": True, "value": frac, "text": f"{frac:.1f}%"})
         rows.append(
             {
                 "date": c_date.strftime("%d %b"),
@@ -304,7 +356,7 @@ def cohort(db: Session, milestone_label: str) -> dict:
             "overall_pct": overall_pct,
             "newest_pct": newest_pct if newest_pct is not None else 0.0,
             "oldest_pct": oldest_pct if oldest_pct is not None else 0.0,
-            "cohorts": sum(1 for c in cohort_dates if per.get(c, {}).get("size", 0) > 0),
+            "cohorts": sum(1 for c in cohort_dates if sizes.get(c, 0) > 0),
             "total_cohorts": 14,
         },
     }
