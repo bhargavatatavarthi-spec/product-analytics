@@ -54,58 +54,38 @@ def test_classification_override_moves_bucket(db):
     assert ov2["buckets"]["lost"]["count"] == 1
 
 
-def test_cohort_maturity(db):
+def test_cohort_places_value_at_cohort_age(db):
     today = date.today()
-    old = today - timedelta(days=10)
-    # Lead entered 10 days ago, reached disbursal same day.
+    old = today - timedelta(days=8)  # cohort is 8 days old
     ingest.ingest_drop(db, _journey_csv([
-        ("A", "Interested", old.isoformat(), "DISBURSEMENT_COMPLETED", "100000"),
+        ("A", "Interested", old.isoformat(), "OFFER_REVIEW", ""),
+        ("B", "Interested", old.isoformat(), "DISBURSEMENT_COMPLETED", "100000"),
+        ("C", "Interested", old.isoformat(), "OFFER_GENERATED", ""),
+        ("D", "Interested", old.isoformat(), "APPLICATION_REJECTED", ""),  # never reached
     ]), filename="j.csv", drop_date=today)
 
-    co = analytics.cohort(db, "Disbursement Completed")
+    co = analytics.cohort(db, "Offer Generated")
     assert len(co["rows"]) == 14
-    # The oldest cohort row (10 days old) should have some mature cells.
-    row = next(r for r in co["rows"] if r["size"] > 0)
-    assert any(c["mature"] for c in row["cells"])
+    row = next(r for r in co["rows"] if r["size"] == 4)
+    assert row["age"] == 8
+    # Exactly one observed cell — at column D8 (the cohort's age).
+    observed = [(i, c["value"]) for i, c in enumerate(row["cells"]) if c["mature"]]
+    assert len(observed) == 1
+    day, value = observed[0]
+    assert day == 8
+    # 3 of 4 (Offer Review, Disbursement, Offer Generated) are at/past Offer Generated.
+    assert value == 75.0
 
 
-def test_cohort_from_milestone_dates(db):
-    from app import ingest
+def test_cohort_reach_is_at_or_past(db):
     today = date.today()
-    entry = today - timedelta(days=10)
-    e = entry.isoformat()
-    # Journey feed with an explicit Disbursement Date column. Three leads in one
-    # cohort reach disbursal at day 0, 3 and 6 after entry; one never reaches.
-    csv = (
-        "INTERNAL_ID,DIY Sub-Stage,Created Date,Disbursement Date\n"
-        f"A,DISBURSEMENT_COMPLETED,{e},{entry.isoformat()}\n"
-        f"B,DISBURSEMENT_COMPLETED,{e},{(entry + timedelta(days=3)).isoformat()}\n"
-        f"C,DISBURSEMENT_COMPLETED,{e},{(entry + timedelta(days=6)).isoformat()}\n"
-        f"D,OFFER_GENERATED,{e},#N/A\n"
-    ).encode()
-    r = ingest.ingest_drop(db, csv, filename="j.csv", drop_date=today)
-    assert "disbursement_on" in r["milestone_dates_detected"]
-
-    co = analytics.cohort(db, "Disbursement Completed")
-    assert co["milestone_dated"] is True
-    row = next(r for r in co["rows"] if r["size"] == 4)  # the 4-lead cohort
-    cells = row["cells"]
-    # Curve climbs: 25% by D0, 50% by D3, 75% by D6 (D never reaches).
-    assert cells[0]["value"] == 25.0
-    assert cells[3]["value"] == 50.0
-    assert cells[6]["value"] == 75.0
-    assert cells[9]["value"] == 75.0  # plateaus
-
-
-def test_cohort_reports_missing_dates(db):
-    from app import ingest
-    today = date.today()
-    ingest.ingest_drop(db, (
-        "INTERNAL_ID,DIY Sub-Stage,Created Date\n"
-        f"A,OFFER_SELECTED,{(today - timedelta(days=5)).isoformat()}\n"
-    ).encode(), filename="j.csv", drop_date=today)
-    # No offer-selected date column -> that cohort flags as undated.
-    assert analytics.cohort(db, "Offer Selected")["milestone_dated"] is False
+    old = today - timedelta(days=5)
+    # A lead at "AA Initiated" counts as having reached the earlier "Offer Selected".
+    ingest.ingest_drop(db, _journey_csv([
+        ("A", "Interested", old.isoformat(), "AA_INITIATED", ""),
+    ]), filename="j.csv", drop_date=today)
+    row = next(r for r in analytics.cohort(db, "Offer Selected")["rows"] if r["size"] == 1)
+    assert row["cells"][5]["value"] == 100.0  # measured at D5, reached
 
 
 def test_dia_date_alias_maps_to_aa_initiated(db):

@@ -57,7 +57,11 @@ class Lead(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     lead_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    # entry_date drives range filters (falls back to the drop date when the feed
+    # has no Created Date). created_on is the *real* Created Date only — null when
+    # absent — so cohorts never invent an entry day for undated leads.
     entry_date: Mapped[date | None] = mapped_column(Date, index=True)
+    created_on: Mapped[date | None] = mapped_column(Date, index=True)
     current_stage: Mapped[str] = mapped_column(String(128), index=True)
     # When the lead first entered its *current* stage (drives days-in-stage/aging).
     stage_entered_on: Mapped[date | None] = mapped_column(Date)
