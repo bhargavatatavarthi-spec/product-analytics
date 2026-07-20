@@ -47,9 +47,9 @@ def test_unclassified_bucket_default(db):
     assert ov["buckets"]["unclassified"]["count"] == 1  # On Hold defaults unclassified
 
 
-def test_cohort_places_value_at_cohort_age(db):
+def test_cohort_places_value_at_cohort_week(db):
     today = date.today()
-    old = today - timedelta(days=8)  # cohort is 8 days old
+    old = today - timedelta(days=8)  # cohort is 8 days old -> week bucket W2 (7-13d)
     ingest.ingest_drop(db, _journey_csv([
         ("A", "Interested", old.isoformat(), "OFFER_REVIEW", ""),
         ("B", "Interested", old.isoformat(), "DISBURSEMENT_COMPLETED", "100000"),
@@ -58,27 +58,47 @@ def test_cohort_places_value_at_cohort_age(db):
     ]), filename="j.csv", drop_date=today)
 
     co = analytics.cohort(db, "Offer Generated")
-    assert len(co["rows"]) == 14
+    assert len(co["cols"]) == 3
+    assert len(co["rows"]) == 21
     row = next(r for r in co["rows"] if r["size"] == 4)
     assert row["age"] == 8
-    # Exactly one observed cell — at column D8 (the cohort's age).
+    assert row["week"] == 2  # 8 days old falls in the second week bucket (7-13d)
+    # Exactly one observed cell — at column W2 (index 1).
     observed = [(i, c["value"]) for i, c in enumerate(row["cells"]) if c["mature"]]
     assert len(observed) == 1
-    day, value = observed[0]
-    assert day == 8
+    col, value = observed[0]
+    assert col == 1
     # 3 of 4 (Offer Review, Disbursement, Offer Generated) are at/past Offer Generated.
     assert value == 75.0
 
 
 def test_cohort_reach_is_at_or_past(db):
     today = date.today()
-    old = today - timedelta(days=5)
+    old = today - timedelta(days=5)  # 5 days old -> week bucket W1 (0-6d)
     # A lead at "AA Initiated" counts as having reached the earlier "Offer Selected".
     ingest.ingest_drop(db, _journey_csv([
         ("A", "Interested", old.isoformat(), "AA_INITIATED", ""),
     ]), filename="j.csv", drop_date=today)
     row = next(r for r in analytics.cohort(db, "Offer Selected")["rows"] if r["size"] == 1)
-    assert row["cells"][5]["value"] == 100.0  # measured at D5, reached
+    assert row["week"] == 1
+    assert row["cells"][0]["value"] == 100.0  # measured at W1, reached
+
+
+def test_cohort_week_boundaries(db):
+    today = date.today()
+    # Ages 6, 7, 13, 14, 20 probe every W1/W2/W3 boundary.
+    ages_and_stages = [(6, "A"), (7, "B"), (13, "C"), (14, "D"), (20, "E")]
+    rows = [
+        (lid, "Interested", (today - timedelta(days=age)).isoformat(), "OFFER_GENERATED", "")
+        for age, lid in ages_and_stages
+    ]
+    ingest.ingest_drop(db, _journey_csv(rows), filename="j.csv", drop_date=today)
+
+    co = analytics.cohort(db, "Offer Generated")
+    weeks_by_age = {r["age"]: r["week"] for r in co["rows"] if r["size"]}
+    assert weeks_by_age == {6: 1, 7: 2, 13: 2, 14: 3, 20: 3}
+    # A lead older than the 21-day window (e.g. 21d) falls outside the grid entirely.
+    assert all(r["age"] <= 20 for r in co["rows"])
 
 
 def test_dia_date_alias_maps_to_aa_initiated(db):

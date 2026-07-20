@@ -223,16 +223,27 @@ def overview(db: Session, range_key: str) -> dict:
 
 
 # ─────────────────────────── cohort triangle ───────────────────────────
+NUM_WEEKS = 3
+WEEK_WINDOW_DAYS = NUM_WEEKS * 7  # 21 days of daily cohorts, bucketed into 3 week columns
+
+
+def _week_bucket(age_days: int) -> int:
+    """Which week-of-age column (0-indexed) an age in days falls into."""
+    return min(age_days // 7, NUM_WEEKS - 1)
+
+
 def cohort(db: Session, milestone_label: str) -> dict:
     """Cohort Triangle from a single snapshot + each lead's current stage.
 
     A cohort = all leads with the same Created Date. Its **age** = as_of −
-    Created Date. From one snapshot we can only observe the cohort *once* — today,
-    at its current age — so each cohort's number sits at exactly one column:
-    `Dage`. The number is the % of that cohort whose current DIY stage is at or
-    past the selected milestone (a lead at "Offer Review" has reached "Offer
-    Generated" and "Offer Review"). Columns other than the cohort's age are left
-    un-observed (we never captured that cohort at a different horizon).
+    Created Date, bucketed into completed weeks (W1 = 0-6d, W2 = 7-13d,
+    W3 = 14-20d old). From one snapshot we can only observe a cohort *once* —
+    today, at its current age — so each cohort's number sits at exactly one
+    week column. The number is the % of that cohort whose current DIY stage is
+    at or past the selected milestone (a lead at "Offer Review" has reached
+    "Offer Generated" and "Offer Review"). The other week columns are left
+    un-observed (we never captured that cohort at a different horizon) —
+    matched to the client's weekly (not daily) import cadence.
     """
     as_of = get_as_of(db)
     milestone_order = catalog.MILESTONE_ORDER.get(
@@ -241,7 +252,7 @@ def cohort(db: Session, milestone_label: str) -> dict:
     # Stages that count as "at or past" this milestone.
     reached_stages = {s for s, o in catalog.STAGE_ORDER.items() if o is not None and o >= milestone_order}
 
-    cohort_dates = [as_of - timedelta(days=13 - i) for i in range(14)]
+    cohort_dates = [as_of - timedelta(days=WEEK_WINDOW_DAYS - 1 - i) for i in range(WEEK_WINDOW_DAYS)]
     earliest = cohort_dates[0]
 
     # size + reached count per cohort, in one GROUP BY (created_on, current_stage).
@@ -259,7 +270,10 @@ def cohort(db: Session, milestone_label: str) -> dict:
         if stage in reached_stages:
             per[entry]["reached"] += count
 
-    cols = [{"label": f"D{d}", "full": f"Day {d}"} for d in range(14)]
+    cols = [
+        {"label": f"W{w + 1}", "full": f"Week {w + 1} ({w * 7}-{w * 7 + 6}d old)"}
+        for w in range(NUM_WEEKS)
+    ]
     rows = []
     total_size = total_reached = 0
     newest_pct = oldest_pct = None
@@ -267,17 +281,18 @@ def cohort(db: Session, milestone_label: str) -> dict:
         stats = per.get(c_date, {"size": 0, "reached": 0})
         size, reached = stats["size"], stats["reached"]
         age = (as_of - c_date).days
+        bucket = _week_bucket(age)
         pct = round(reached / size * 100, 1) if size else 0.0
         total_size += size
         total_reached += reached
         if age == 0:
             newest_pct = pct
-        if age == 13:
+        if age == WEEK_WINDOW_DAYS - 1:
             oldest_pct = pct
-        # Exactly one observed cell, at the cohort's current age (Dage).
+        # Exactly one observed cell, in the week column matching the cohort's age.
         cells = []
-        for day in range(14):
-            if day == age and size:
+        for w in range(NUM_WEEKS):
+            if w == bucket and size:
                 cells.append({"mature": True, "value": pct, "text": f"{pct:.1f}%"})
             else:
                 cells.append({"mature": False, "value": None, "text": ""})
@@ -287,6 +302,7 @@ def cohort(db: Session, milestone_label: str) -> dict:
                 "size": size,
                 "size_label": indian_format(size),
                 "age": age,
+                "week": bucket + 1,
                 "cells": cells,
             }
         )
@@ -305,7 +321,7 @@ def cohort(db: Session, milestone_label: str) -> dict:
             "newest_pct": newest_pct if newest_pct is not None else 0.0,
             "oldest_pct": oldest_pct if oldest_pct is not None else 0.0,
             "cohorts": sum(1 for c in cohort_dates if per.get(c, {}).get("size", 0) > 0),
-            "total_cohorts": 14,
+            "total_cohorts": WEEK_WINDOW_DAYS,
         },
     }
 
