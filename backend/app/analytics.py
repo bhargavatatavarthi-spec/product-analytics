@@ -233,17 +233,20 @@ def _week_bucket(age_days: int) -> int:
 
 
 def cohort(db: Session, milestone_label: str) -> dict:
-    """Cohort Triangle from a single snapshot + each lead's current stage.
+    """Cumulative cohort funnel: reach of a milestone by week 1 / 2 / 3.
 
-    A cohort = all leads with the same Created Date. Its **age** = as_of −
-    Created Date, bucketed into completed weeks (W1 = 0-6d, W2 = 7-13d,
-    W3 = 14-20d old). From one snapshot we can only observe a cohort *once* —
-    today, at its current age — so each cohort's number sits at exactly one
-    week column. The number is the % of that cohort whose current DIY stage is
-    at or past the selected milestone (a lead at "Offer Review" has reached
-    "Offer Generated" and "Offer Review"). The other week columns are left
-    un-observed (we never captured that cohort at a different horizon) —
-    matched to the client's weekly (not daily) import cadence.
+    A cohort = the fixed set of leads with the same Created Date. Each week
+    column is the **cumulative** share of that cohort observed to have reached
+    (at or past) the selected milestone *by the end of* that week of age:
+    W1 = by day 6, W2 = by day 13, W3 = by day 20. Because it is cumulative,
+    the columns never decrease left-to-right (a lead that reached a stage stays
+    reached), and the denominator is always the full cohort size.
+
+    Reach timing comes from the stored ``StageEvent`` history — the drop date on
+    which a lead was first observed at/past the milestone — so a cohort's row
+    fills across the weeks as successive (weekly) snapshots are imported. With a
+    single snapshot a cohort is only observed once, so just the week matching its
+    current age is populated; the triangle fills in as more drops arrive.
     """
     as_of = get_as_of(db)
     milestone_order = catalog.MILESTONE_ORDER.get(
@@ -254,60 +257,92 @@ def cohort(db: Session, milestone_label: str) -> dict:
 
     cohort_dates = [as_of - timedelta(days=WEEK_WINDOW_DAYS - 1 - i) for i in range(WEEK_WINDOW_DAYS)]
     earliest = cohort_dates[0]
+    cutoffs = [w * 7 + 6 for w in range(NUM_WEEKS)]  # week-end ages: 6, 13, 20
 
-    # size + reached count per cohort, in one GROUP BY (created_on, current_stage).
-    # Cohorts use the real Created Date (created_on) only — leads with no Created
-    # Date in the feed are excluded rather than lumped into a fake "today" cohort.
-    per: dict[date, dict[str, int]] = defaultdict(lambda: {"size": 0, "reached": 0})
-    for entry, stage, count in db.execute(
-        select(Lead.created_on, Lead.current_stage, func.count())
+    # Cohort size + the earliest age at which we observed the cohort at all, in
+    # one GROUP BY. Cohorts use the real Created Date (created_on) only — leads
+    # with no Created Date are excluded, not lumped into a fake "today" cohort.
+    size: dict[date, int] = {}
+    first_age: dict[date, int] = {}
+    for cdate, cnt, first_seen in db.execute(
+        select(Lead.created_on, func.count(), func.min(Lead.first_seen_on))
         .where(Lead.created_on >= earliest, Lead.created_on <= as_of)
-        .group_by(Lead.created_on, Lead.current_stage)
+        .group_by(Lead.created_on)
     ).all():
-        if entry is None:
+        if cdate is None:
             continue
-        per[entry]["size"] += count
-        if stage in reached_stages:
-            per[entry]["reached"] += count
+        size[cdate] = cnt
+        first_age[cdate] = (first_seen - cdate).days if first_seen else 0
+
+    # Per-lead earliest reach: the first drop date a lead was seen at/past the
+    # milestone (from StageEvent). reach_age = that date − Created Date. Bucket
+    # each reached lead cumulatively into every week whose cutoff it meets.
+    cum: dict[date, list[int]] = defaultdict(lambda: [0] * NUM_WEEKS)
+    if reached_stages:
+        for cdate, reach_on in db.execute(
+            select(Lead.created_on, func.min(StageEvent.observed_on))
+            .join(StageEvent, StageEvent.lead_pk == Lead.id)
+            .where(
+                Lead.created_on >= earliest,
+                Lead.created_on <= as_of,
+                StageEvent.stage.in_(reached_stages),
+            )
+            .group_by(Lead.id)
+        ).all():
+            if cdate is None or reach_on is None:
+                continue
+            reach_age = max(0, (reach_on - cdate).days)
+            for w, cut in enumerate(cutoffs):
+                if reach_age <= cut:
+                    cum[cdate][w] += 1
 
     cols = [
-        {"label": f"W{w + 1}", "full": f"Week {w + 1} ({w * 7}-{w * 7 + 6}d old)"}
+        {"label": f"W{w + 1}", "full": f"Week {w + 1} (reached by day {w * 7 + 6})"}
         for w in range(NUM_WEEKS)
     ]
     rows = []
     total_size = total_reached = 0
-    newest_pct = oldest_pct = None
+    nonempty = []  # (age, reached_now_pct) for cohorts that have leads
     for c_date in cohort_dates:
-        stats = per.get(c_date, {"size": 0, "reached": 0})
-        size, reached = stats["size"], stats["reached"]
+        sz = size.get(c_date, 0)
         age = (as_of - c_date).days
-        bucket = _week_bucket(age)
-        pct = round(reached / size * 100, 1) if size else 0.0
-        total_size += size
-        total_reached += reached
-        if age == 0:
-            newest_pct = pct
-        if age == WEEK_WINDOW_DAYS - 1:
-            oldest_pct = pct
-        # Exactly one observed cell, in the week column matching the cohort's age.
+        fa = first_age.get(c_date, age)
+        counts = cum.get(c_date, [0] * NUM_WEEKS)
+        total_size += sz
+        total_reached += counts[NUM_WEEKS - 1]  # reached by current age (cumulative)
+        if sz:
+            nonempty.append((age, round(counts[NUM_WEEKS - 1] / sz * 100, 1)))
         cells = []
         for w in range(NUM_WEEKS):
-            if w == bucket and size:
-                cells.append({"mature": True, "value": pct, "text": f"{pct:.1f}%"})
+            week_start, week_end = w * 7, w * 7 + 6
+            # Observed only if the cohort has entered this week (age past its
+            # start) AND we began watching it by the week's end (so the week is
+            # actually covered by a snapshot, not silently read as zero).
+            observed = sz > 0 and age >= week_start and fa <= week_end
+            if observed:
+                pct = round(counts[w] / sz * 100, 1)
+                cells.append({
+                    "mature": True, "value": pct, "text": f"{pct:.1f}%",
+                    "partial": age < week_end,  # week still in progress for this cohort
+                })
             else:
-                cells.append({"mature": False, "value": None, "text": ""})
+                cells.append({"mature": False, "value": None, "text": "", "partial": False})
         rows.append(
             {
                 "date": c_date.strftime("%d %b"),
-                "size": size,
-                "size_label": indian_format(size),
+                "size": sz,
+                "size_label": indian_format(sz),
                 "age": age,
-                "week": bucket + 1,
+                "week": _week_bucket(age) + 1,
                 "cells": cells,
             }
         )
 
     overall_pct = round(total_reached / total_size * 100, 1) if total_size else 0.0
+    # Newest / oldest reach = cumulative reach-so-far of the youngest / oldest
+    # cohort that actually has leads (skip empty date rows at the window edges).
+    newest_pct = min(nonempty, key=lambda x: x[0])[1] if nonempty else 0.0
+    oldest_pct = max(nonempty, key=lambda x: x[0])[1] if nonempty else 0.0
     return {
         "as_of": as_of.isoformat(),
         "milestone": milestone_label,
@@ -318,9 +353,9 @@ def cohort(db: Session, milestone_label: str) -> dict:
         "rows": rows,
         "summary": {
             "overall_pct": overall_pct,
-            "newest_pct": newest_pct if newest_pct is not None else 0.0,
-            "oldest_pct": oldest_pct if oldest_pct is not None else 0.0,
-            "cohorts": sum(1 for c in cohort_dates if per.get(c, {}).get("size", 0) > 0),
+            "newest_pct": newest_pct,
+            "oldest_pct": oldest_pct,
+            "cohorts": sum(1 for c in cohort_dates if size.get(c, 0) > 0),
             "total_cohorts": WEEK_WINDOW_DAYS,
         },
     }

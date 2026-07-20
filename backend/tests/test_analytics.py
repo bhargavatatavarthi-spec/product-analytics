@@ -47,9 +47,9 @@ def test_unclassified_bucket_default(db):
     assert ov["buckets"]["unclassified"]["count"] == 1  # On Hold defaults unclassified
 
 
-def test_cohort_places_value_at_cohort_week(db):
+def test_cohort_single_snapshot_fills_only_current_week(db):
     today = date.today()
-    old = today - timedelta(days=8)  # cohort is 8 days old -> week bucket W2 (7-13d)
+    old = today - timedelta(days=8)  # observed once, at age 8 -> week 2
     ingest.ingest_drop(db, _journey_csv([
         ("A", "Interested", old.isoformat(), "OFFER_REVIEW", ""),
         ("B", "Interested", old.isoformat(), "DISBURSEMENT_COMPLETED", "100000"),
@@ -62,19 +62,18 @@ def test_cohort_places_value_at_cohort_week(db):
     assert len(co["rows"]) == 21
     row = next(r for r in co["rows"] if r["size"] == 4)
     assert row["age"] == 8
-    assert row["week"] == 2  # 8 days old falls in the second week bucket (7-13d)
-    # Exactly one observed cell — at column W2 (index 1).
+    # First observed at age 8, so W1 (by day 6) was never watched -> only W2 shows.
     observed = [(i, c["value"]) for i, c in enumerate(row["cells"]) if c["mature"]]
     assert len(observed) == 1
     col, value = observed[0]
-    assert col == 1
+    assert col == 1  # W2
     # 3 of 4 (Offer Review, Disbursement, Offer Generated) are at/past Offer Generated.
     assert value == 75.0
 
 
 def test_cohort_reach_is_at_or_past(db):
     today = date.today()
-    old = today - timedelta(days=5)  # 5 days old -> week bucket W1 (0-6d)
+    old = today - timedelta(days=5)  # 5 days old -> observed in W1 (0-6d)
     # A lead at "AA Initiated" counts as having reached the earlier "Offer Selected".
     ingest.ingest_drop(db, _journey_csv([
         ("A", "Interested", old.isoformat(), "AA_INITIATED", ""),
@@ -82,6 +81,30 @@ def test_cohort_reach_is_at_or_past(db):
     row = next(r for r in analytics.cohort(db, "Offer Selected")["rows"] if r["size"] == 1)
     assert row["week"] == 1
     assert row["cells"][0]["value"] == 100.0  # measured at W1, reached
+
+
+def test_cohort_cumulative_reach_across_snapshots(db):
+    """Two weekly drops -> a cohort's row fills cumulatively across W1 and W2."""
+    today = date.today()
+    created = today - timedelta(days=10)          # cohort created 10 days ago
+    drop1 = today - timedelta(days=7)             # age 3 (week 1): only offer generated
+    drop2 = today                                 # age 10 (week 2): now disbursed
+    ingest.ingest_drop(db, _journey_csv([
+        ("A", "Interested", created.isoformat(), "OFFER_GENERATED", ""),
+    ]), filename="d1.csv", drop_date=drop1)
+    ingest.ingest_drop(db, _journey_csv([
+        ("A", "Interested", created.isoformat(), "DISBURSEMENT_COMPLETED", "100000"),
+    ]), filename="d2.csv", drop_date=drop2)
+
+    # Offer Generated was reached in week 1 -> cumulative 100% from W1 onward.
+    og = next(r for r in analytics.cohort(db, "Offer Generated")["rows"] if r["size"] == 1)
+    assert og["cells"][0]["value"] == 100.0  # W1
+    assert og["cells"][1]["value"] == 100.0  # W2 (still reached)
+
+    # Disbursement only happened in week 2 -> 0% by W1, 100% by W2 (cumulative).
+    dc = next(r for r in analytics.cohort(db, "Disbursement Completed")["rows"] if r["size"] == 1)
+    assert dc["cells"][0]["mature"] is True and dc["cells"][0]["value"] == 0.0   # W1: not yet
+    assert dc["cells"][1]["mature"] is True and dc["cells"][1]["value"] == 100.0  # W2: reached
 
 
 def test_cohort_week_boundaries(db):

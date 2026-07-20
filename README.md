@@ -60,10 +60,12 @@ gracefully** (honest empty states, never fabricated numbers):
 
 - **stage** → Overview buckets
 - **entry_date (Created Date)** → cohort rows, range filters, time-in-stage
-- **stage** + **entry_date** → the **Cohort Triangle**. Each Created-Date cohort
-  is measured once, in the week column matching its current age (W1 = 0-6d,
-  W2 = 7-13d, W3 = 14-20d); reach = % of the cohort whose current stage is at
-  or past the selected milestone. No milestone-date column is required.
+- **stage** + **entry_date** + **StageEvent history** → the **Cohort Triangle**.
+  Each Created-Date cohort shows the **cumulative** % that reached (at or past)
+  the selected milestone **by** week 1 (day 6), week 2 (day 13) and week 3
+  (day 20) of age. Reach timing comes from the drop on which a lead was first
+  seen at/past the milestone, so a cohort's row fills across the weeks as
+  successive weekly snapshots are imported. No milestone-date column is required.
 - **DIS VALUE** → Attribution ₹ amounts
 - **max_loan_amount / tenure / roi / schemecode** → Attribution metadata cuts
 - **DIS VALUE** → Attribution ₹ amounts
