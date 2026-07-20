@@ -78,7 +78,7 @@ const NAV = [
 
 const SCREEN_META = {
   overview: ["Overview", "The whole entered population, split into Won, In-flight and Lost"],
-  cohort: ["Cohort Triangle", "Milestone reach by entry-date cohort and days since entry"],
+  cohort: ["Cohort Triangle", "Milestone reach by entry-date cohort and weeks since entry"],
   attribution: ["Attribution", "Lead metadata, call outcomes and journey-stage credit for every disbursal"],
   import: ["Data Import", "Upload a daily offer or journey drop and fold it into the analytics"],
 };
@@ -323,14 +323,15 @@ async function renderCohort() {
         return h("div", { style: Object.assign({}, cellBase, { background: "repeating-linear-gradient(45deg,#f4f2f9,#f4f2f9 4px,#e7e3f2 4px,#e7e3f2 8px)", color: "#c3bed0" }) }, "");
       }
       const t = cell.value / 100;
-      return h("div", { style: Object.assign({}, cellBase, { background: heat(t), color: t > 0.5 ? "#fff" : "var(--ss-darkmatter)" }), title: `${row.date} cohort at ${row.age}d old · ${cell.text} now at/past ${state.milestone}` }, cell.text);
+      const wk = row.cells.indexOf(cell) + 1;
+      return h("div", { style: Object.assign({}, cellBase, { background: heat(t), color: t > 0.5 ? "#fff" : "var(--ss-darkmatter)", opacity: cell.partial ? 0.72 : 1 }), title: `${row.date} cohort · ${cell.text} reached ${state.milestone} by week ${wk}${cell.partial ? " (week still in progress)" : ""}` }, cell.text + (cell.partial ? "*" : ""));
     })));
 
   const summaryCard = h("div", { class: "card", style: { padding: "18px" } },
     h("div", { class: "ss-eyebrow", style: { marginBottom: "12px" } }, "Cohort summary"),
     summaryStat("At/past " + d.milestone_short + " (all)", d.summary.overall_pct, "%"),
     summaryStat("Newest cohort (today)", d.summary.newest_pct, "%"),
-    summaryStat("Oldest cohort (13d)", d.summary.oldest_pct, "%"));
+    summaryStat("Oldest cohort (W3)", d.summary.oldest_pct, "%"));
 
   const legendCard = h("div", { class: "card", style: { padding: "18px" } },
     h("div", { class: "ss-eyebrow", style: { marginBottom: "12px" } }, "Legend"),
@@ -338,11 +339,11 @@ async function renderCohort() {
     h("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "11px", color: "var(--ss-fg-subtle)", fontWeight: "600", marginBottom: "14px" } }, h("span", null, "Low"), h("span", null, "High reach")),
     h("div", { style: { display: "flex", alignItems: "center", gap: "9px" } },
       h("span", { style: { width: "26px", height: "20px", flex: "none", borderRadius: "3px", background: "repeating-linear-gradient(45deg,#f4f2f9,#f4f2f9 4px,#e7e3f2 4px,#e7e3f2 8px)", border: "1px solid var(--ss-border)" } }),
-      h("span", { style: { fontSize: "12px", fontWeight: "600", color: "var(--ss-fg-muted)" } }, "Not observed at this age")));
+      h("span", { style: { fontSize: "12px", fontWeight: "600", color: "var(--ss-fg-muted)" } }, "Week not yet observed")));
 
   setContent(h("div", null,
     h("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "20px", marginBottom: "20px", flexWrap: "wrap" } },
-      h("p", { style: { margin: "0", maxWidth: "660px", fontSize: "13.5px", color: "var(--ss-fg-muted)", lineHeight: "1.5" }, html: 'Rows are Created-Date cohorts; the column is days since entry (today − Created Date). Each cohort is measured once — at its current age — showing the share now <strong style="color:var(--ss-fg)">at or past</strong> the milestone. Other columns are un-observed: a single daily snapshot can\'t show a cohort at an earlier age.' }),
+      h("p", { style: { margin: "0", maxWidth: "660px", fontSize: "13.5px", color: "var(--ss-fg-muted)", lineHeight: "1.5" }, html: 'Rows are Created-Date cohorts (a fixed set of leads). Each column is the <strong style="color:var(--ss-fg)">cumulative</strong> share of that cohort that had reached the milestone <strong style="color:var(--ss-fg)">by</strong> the end of week 1 (day 6), week 2 (day 13) and week 3 (day 20) of age — so the numbers only grow left-to-right. Reach timing comes from the imported snapshot history; a * marks a week still in progress for that cohort.' }),
       h("div", null, h("div", { style: { fontSize: "10px", fontWeight: "600", letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ss-fg-subtle)", marginBottom: "6px" } }, "Milestone reached"), milestoneCtrls)),
     h("div", { class: "triangle-wrap" },
       h("div", { class: "triangle" }, h("div", { class: "triangle-inner" }, header, ...rows)),
